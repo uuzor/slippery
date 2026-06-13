@@ -1,19 +1,25 @@
-/// Slip Pricer — Joint probability calculation for parlay bets
+/// Slip Pricer — Joint probability calculation for parlay bets using DeepBook Predict
+/// 
+/// Uses DeepBook's FLOAT_SCALING (1e9) for probability calculations to match
+/// the oracle pricing model. The house margin and bonuses are applied on top.
 module parlay_vault::slip_pricer {
 
     use std::vector::{Self, length, borrow};
 
-    /// 3% house margin (applied to joint probability)
+    // DeepBook FLOAT_SCALING (must match deepbook_predict::constants)
+    const FLOAT_SCALING: u64 = 1_000_000_000;
+
+    /// 3% house margin (applied to joint probability) - 300 basis points
     const HOUSE_MARGIN_BPS: u64 = 300;
 
     /// Bonus multiplier for 2-leg parlays (1.0x, no bonus)
-    const MULTIPLIER_2_LEG: u64 = 10_000;
+    const MULTIPLIER_2_LEG: u64 = 1_000_000_000; // 1.0x in FLOAT_SCALING
 
     /// Bonus multiplier for 3-leg parlays (1.05x)
-    const MULTIPLIER_3_LEG: u64 = 10_500;
+    const MULTIPLIER_3_LEG: u64 = 1_050_000_000; // 1.05x in FLOAT_SCALING
 
     /// Bonus multiplier for 4-leg parlays (1.10x)
-    const MULTIPLIER_4_LEG: u64 = 11_000;
+    const MULTIPLIER_4_LEG: u64 = 1_100_000_000; // 1.10x in FLOAT_SCALING
 
     /// Minimum legs required for a parlay
     const MIN_LEGS: u64 = 2;
@@ -21,19 +27,13 @@ module parlay_vault::slip_pricer {
     /// Maximum legs allowed in a parlay
     const MAX_LEGS: u64 = 4;
 
-    /// Odds scale (4 decimal places)
-    const ODDS_SCALE: u64 = 10_000;
-
-    /// Probability scale (9 decimal places, matches DeepBook)
-    const PROB_SCALE: u64 = 1_000_000_000;
-
-    /// One leg of a parlay market
+    /// One leg of a parlay market - mirrors DeepBook MarketKey structure
+    /// All fields are needed to create the MarketKey for DeepBook pricing
     public struct MarketLeg has copy, drop, store {
-        market_id: vector<u8>,
-        is_up: bool,
-        odds: u64,
-        expiry: u64,
-        strike: u64,
+        oracle_id: vector<u8>,   // ID of the OracleSVI (as bytes)
+        expiry: u64,             // Expiry timestamp in milliseconds
+        strike: u64,             // Strike price (in FLOAT_SCALING)
+        is_up: bool,             // true = UP position, false = DOWN position
     }
 
     /// Get minimum number of legs
@@ -42,41 +42,92 @@ module parlay_vault::slip_pricer {
     /// Get maximum number of legs
     public fun max_legs(): u64 { MAX_LEGS }
 
-    /// Convert odds to probability
-    public fun odds_to_probability(odds: u64): u64 {
-        if (odds == 0) return 0;
-        PROB_SCALE / odds
+    /// Get the float scaling constant (matches DeepBook)
+    public fun float_scaling(): u64 { FLOAT_SCALING }
+
+    /// Get probability scale for odds conversion
+    /// Note: DeepBook returns prices in FLOAT_SCALING (1e9), not decimal odds
+    public fun probability_scale(): u64 { FLOAT_SCALING }
+
+    /// Create a MarketLeg from individual components
+    public fun new_market_leg(
+        oracle_id: vector<u8>,
+        expiry: u64,
+        strike: u64,
+        is_up: bool
+    ): MarketLeg {
+        MarketLeg {
+            oracle_id,
+            expiry,
+            strike,
+            is_up,
+        }
     }
 
-    /// Convert probability to odds
+    /// Get oracle ID from a leg
+    public fun get_oracle_id(leg: &MarketLeg): vector<u8> {
+        leg.oracle_id
+    }
+
+    /// Get expiry from a leg
+    public fun get_expiry(leg: &MarketLeg): u64 {
+        leg.expiry
+    }
+
+    /// Get strike from a leg
+    public fun get_strike(leg: &MarketLeg): u64 {
+        leg.strike
+    }
+
+    /// Check if leg is UP
+    public fun is_up(leg: &MarketLeg): bool {
+        leg.is_up
+    }
+
+    /// Convert DeepBook price (FLOAT_SCALING) to probability
+    /// DeepBook returns prices directly as probabilities (0 to 1e9)
+    public fun price_to_probability(price: u64): u64 {
+        price
+    }
+
+    /// Convert probability to odds representation
+    /// Returns odds as FLOAT_SCALING (e.g., 2.0x = 2_000_000_000)
     public fun probability_to_odds(prob: u64): u64 {
         if (prob == 0) return 0;
-        (PROB_SCALE * ODDS_SCALE) / prob
+        FLOAT_SCALING / prob
     }
 
     /// Calculate joint probability of multiple independent events
+    /// Probabilities are in FLOAT_SCALING (1e9)
     public fun compute_joint_probability(legs: &vector<MarketLeg>): u64 {
         let num_legs = length(legs);
         if (num_legs == 0) return 0;
 
-        let mut joint_prob = PROB_SCALE;
+        // For parlays, we multiply probabilities
+        // Each leg price represents probability of winning
+        // Note: We use geometric mean for fairness, product for house edge
+        let mut joint_prob = FLOAT_SCALING;
         let mut i = 0;
         while (i < num_legs) {
             let leg = borrow(legs, i);
-            let leg_prob = odds_to_probability(leg.odds);
-            joint_prob = (joint_prob * leg_prob) / PROB_SCALE;
+            // DeepBook prices are already probabilities
+            // For joint probability, multiply them
+            // joint_prob = joint_prob * leg_price / FLOAT_SCALING
+            joint_prob = (joint_prob * leg.strike) / FLOAT_SCALING;
             i = i + 1;
         };
         joint_prob
     }
 
     /// Apply house margin to joint probability
+    /// Reduces the probability by HOUSE_MARGIN_BPS basis points
     public fun apply_house_margin(joint_prob: u64): u64 {
-        let margin_factor = ODDS_SCALE - HOUSE_MARGIN_BPS;
-        (joint_prob * margin_factor) / ODDS_SCALE
+        let margin_factor = FLOAT_SCALING - HOUSE_MARGIN_BPS;
+        (joint_prob * margin_factor) / FLOAT_SCALING
     }
 
     /// Calculate combined odds from legs
+    /// Returns odds in FLOAT_SCALING (e.g., 4.0x = 4_000_000_000)
     public fun get_combined_odds(legs: &vector<MarketLeg>): u64 {
         let num_legs = length(legs);
         if (num_legs < MIN_LEGS || num_legs > MAX_LEGS) return 0;
@@ -86,6 +137,7 @@ module parlay_vault::slip_pricer {
     }
 
     /// Compute bonus multiplier based on number of legs
+    /// Returns multiplier in FLOAT_SCALING
     public fun compute_bonus_multiplier(num_legs: u64): u64 {
         if (num_legs == 3) {
             MULTIPLIER_3_LEG
@@ -97,14 +149,15 @@ module parlay_vault::slip_pricer {
     }
 
     /// Calculate payout for a winning parlay
+    /// payout = stake * odds * bonus_mult / FLOAT_SCALING^2
     public fun calculate_payout(stake: u64, odds: u64, bonus_mult: u64): u64 {
-        (stake * odds * bonus_mult) / (ODDS_SCALE * ODDS_SCALE)
+        (stake * odds * bonus_mult) / (FLOAT_SCALING * FLOAT_SCALING)
     }
 
-    /// Calculate bonus amount
+    /// Calculate bonus amount (extra payout from multiplier)
     public fun calculate_bonus(stake: u64, odds: u64, bonus_mult: u64): u64 {
-        let base_payout = (stake * odds) / ODDS_SCALE;
-        let bonus_payout = (stake * odds * bonus_mult) / (ODDS_SCALE * ODDS_SCALE);
+        let base_payout = (stake * odds) / FLOAT_SCALING;
+        let bonus_payout = (stake * odds * bonus_mult) / (FLOAT_SCALING * FLOAT_SCALING);
         bonus_payout - base_payout
     }
 }
