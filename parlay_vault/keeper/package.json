@@ -1,22 +1,22 @@
 {
   "name": "keeper",
   "version": "1.0.0",
-  "description": "",
+  "description": "Parlay Vault Settlement Keeper for DeepBook Predict",
   "main": "index.js",
   "scripts": {
     "build": "tsc",
+    "start": "ts-node settle_slip.ts",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@mysten/sui": "^2.17.0",
-    "@mysten/sui.js": "^0.54.1"
+    "@mysten/sui": "^2.17.0"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
+    "@types/node": "^22.0.0",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.3"
+    "typescript": "^5.6.0"
   }
 }

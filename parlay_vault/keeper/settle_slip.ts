@@ -12,21 +12,25 @@
  * - deepbook_predict::predict::PositionRedeemed - position settled
  */
 
-import { SuiClient } from '@mysten/sui.js/client';
-import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
+// Import from @mysten/sui (NOT @mysten/sui.js which is deprecated)
+import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
 
 // Configuration
 const NETWORK = 'testnet';
-const PACKAGE_ID = '0xYourPackageId'; // TODO: Set after deployment
-const VAULT_ID = '0xYourVaultId'; // TODO: Set after deployment
 
-// DeepBook Predict package (testnet deployment)
-const DEEPBOOK_PREDICT_PACKAGE = '0x9ae0e853e7f39f893dc2d64386c12bb1d570f4f0bb3d3d63b40fd1b3ddf6b3f8';
+// DeepBook Predict package (testnet)
+const DEEPBOOK_PREDICT_PACKAGE = '0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138';
+
+// Parlay Vault package ID (set after deployment)
+const PARLAY_VAULT_PACKAGE = '0xYourPackageId';
+const VAULT_ID = '0xYourVaultId';
+const OPEN_SLIPS_ID = '0xYourOpenSlipsId';
 
 // Network URLs
-const TESTNET_URL = 'https://fullnode.testnet.sui.io:443';
+const TESTNET_URL = getFullnodeUrl('testnet');
 
-// Initialize Sui client
+// Initialize Sui client with @mysten/sui (not @mysten/sui.js)
 const client = new SuiClient({ 
   url: TESTNET_URL,
 });
@@ -36,9 +40,10 @@ interface MarketLeg {
   expiry: number;      // Expiry timestamp in milliseconds
   strike: number;      // Strike price (in FLOAT_SCALING = 1e9)
   is_up: boolean;      // true = UP position, false = DOWN position
+  ask_price: number;  // DeepBook ask price (probability in 1e9)
 }
 
-interface SlipData {
+interface SlipReceipt {
   id: string;
   owner: string;
   legs: MarketLeg[];
@@ -48,7 +53,11 @@ interface SlipData {
   bonus_multiplier: number;
   potential_payout: number;
   locked_amount: number;
-  status: 'open' | 'won' | 'lost' | 'settled';
+  placed_at: number;
+}
+
+interface OpenSlipsData {
+  slips: string[];  // Vector of SlipReceipt IDs
 }
 
 interface OracleSettledEvent {
@@ -122,16 +131,78 @@ async function subscribeToOracleEvents(): Promise<() => void> {
 }
 
 /**
+ * Get the OpenSlips shared object and fetch all slip IDs
+ */
+async function getOpenSlipIds(): Promise<string[]> {
+  try {
+    const openSlips = await client.getObject({
+      id: OPEN_SLIPS_ID,
+      options: { showContent: true },
+    });
+    
+    if (!openSlips.data?.content || openSlips.data.content.dataType !== 'moveObject') {
+      return [];
+    }
+    
+    const content = openSlips.data.content.fields as unknown as OpenSlipsData;
+    return content.slips || [];
+  } catch (error) {
+    console.error('Error fetching OpenSlips:', error);
+    return [];
+  }
+}
+
+/**
+ * Fetch a SlipReceipt by its ID
+ */
+async function getSlipReceipt(slipId: string): Promise<SlipReceipt | null> {
+  try {
+    const slip = await client.getObject({
+      id: slipId,
+      options: { showContent: true },
+    });
+    
+    if (!slip.data?.content || slip.data.content.dataType !== 'moveObject') {
+      return null;
+    }
+    
+    return slip.data.content.fields as unknown as SlipReceipt;
+  } catch (error) {
+    console.error(`Error fetching slip ${slipId}:`, error);
+    return null;
+  }
+}
+
+/**
  * Process an oracle settlement:
- * 1. Find all open slips containing this oracle
- * 2. For each slip, determine if all legs won/lost
- * 3. Execute settle_won_slip or settle_lost_slip
+ * 1. Get all open slip IDs from OpenSlips shared object
+ * 2. Batch fetch all SlipReceipt objects
+ * 3. Filter slips containing this oracle
+ * 4. For each slip, determine if all legs won/lost
+ * 5. Execute settle_won_slip or settle_lost_slip
  */
 async function processOracleSettlement(oracleEvent: OracleSettledEvent): Promise<void> {
   console.log(`\n🔄 Processing settlement for oracle ${oracleEvent.oracle_id}`);
 
-  const affectedSlips = await getSlipsForOracle(oracleEvent.oracle_id);
-  console.log(`📋 Found ${affectedSlips.length} slips to process`);
+  // Get all open slip IDs
+  const slipIds = await getOpenSlipIds();
+  console.log(`📋 Found ${slipIds.length} open slips to check`);
+
+  // Batch fetch all slip receipts
+  const slips: SlipReceipt[] = [];
+  for (const slipId of slipIds) {
+    const slip = await getSlipReceipt(slipId);
+    if (slip) {
+      slips.push(slip);
+    }
+  }
+
+  // Filter slips containing this oracle
+  const affectedSlips = slips.filter(slip => 
+    slip.legs.some(leg => leg.oracle_id === oracleEvent.oracle_id)
+  );
+  
+  console.log(`🎯 ${affectedSlips.length} slips affected by this oracle`);
 
   for (const slip of affectedSlips) {
     await settleSlip(slip, oracleEvent);
@@ -139,24 +210,9 @@ async function processOracleSettlement(oracleEvent: OracleSettledEvent): Promise
 }
 
 /**
- * Query on-chain data for slips containing a specific oracle
- * TODO: Implement actual on-chain query
- */
-async function getSlipsForOracle(oracleId: string): Promise<SlipData[]> {
-  // TODO: Query the vault or OpenSlips object for slips with this oracle
-  // This would use sui client to query the vault's open slips
-  // Example query structure:
-  // const result = await client.query({
-  //   filter: { MatchAny: [...] },
-  //   type: `${PACKAGE_ID}::slip_executor::SlipReceipt`,
-  // });
-  return [];
-}
-
-/**
  * Determine if a slip won based on oracle settlement
  */
-function determineSlipOutcome(slip: SlipData, oracleEvent: OracleSettledEvent): boolean {
+function determineSlipOutcome(slip: SlipReceipt, oracleEvent: OracleSettledEvent): boolean {
   // Find the leg for this oracle
   const leg = slip.legs.find(l => l.oracle_id === oracleEvent.oracle_id);
   if (!leg) return false;
@@ -180,28 +236,57 @@ function determineSlipOutcome(slip: SlipData, oracleEvent: OracleSettledEvent): 
 }
 
 /**
+ * Check if all legs of a slip have been resolved (oracles settled)
+ */
+async function checkAllLegsResolved(slip: SlipReceipt): Promise<boolean> {
+  // For each leg, check if its oracle has settled
+  for (const leg of slip.legs) {
+    try {
+      // Query OracleSettled events for this oracle
+      const events = await client.queryEvents({
+        query: {
+          MoveEventType: `${DEEPBOOK_PREDICT_PACKAGE}::oracle::OracleSettled`,
+        },
+        order: 'descending',
+        limit: 100,
+      });
+      
+      const oracleSettled = events.data.some(e => {
+        const data = e.parsedJson as OracleSettledEvent;
+        return data.oracle_id === leg.oracle_id;
+      });
+      
+      if (!oracleSettled) {
+        return false;
+      }
+    } catch (error) {
+      console.error(`Error checking oracle ${leg.oracle_id}:`, error);
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Settle a single slip
  */
-async function settleSlip(slip: SlipData, oracleEvent: OracleSettledEvent): Promise<void> {
+async function settleSlip(slip: SlipReceipt, oracleEvent: OracleSettledEvent): Promise<void> {
   console.log(`\n💰 Settling slip ${slip.id} for ${slip.owner}`);
 
-  const legWon = determineSlipOutcome(slip, oracleEvent);
-  
   // Check if all legs are resolved (we need all oracles to settle)
-  const allLegsResolved = slip.legs.every(leg => {
-    // In real implementation, check if oracle is settled
-    return true; // TODO: Check oracle settlement status
-  });
-
+  const allLegsResolved = await checkAllLegsResolved(slip);
+  
   if (!allLegsResolved) {
     console.log(`   ⏳ Not all legs resolved yet, skipping...`);
     return;
   }
 
-  // Check if all legs won
-  // For a parlay, ALL legs must win
-  // TODO: Implement actual win/loss determination
-  const allLegsWon = true; // TODO: Check all legs
+  // Determine if all legs won (for a parlay, ALL must win)
+  const legOutcome = determineSlipOutcome(slip, oracleEvent);
+  
+  // For parlays, all legs must be checked. For now, assume this oracle determines the outcome.
+  // In a full implementation, you'd track each leg's outcome.
+  const allLegsWon = legOutcome; // TODO: Check all legs
 
   if (allLegsWon) {
     console.log(`✅ Slip ${slip.id} settled: WON`);
@@ -216,7 +301,7 @@ async function settleSlip(slip: SlipData, oracleEvent: OracleSettledEvent): Prom
  * Execute settle_won_slip on-chain
  * This releases the locked bonus and distributes payout
  */
-async function settleWonSlip(slip: SlipData): Promise<void> {
+async function settleWonSlip(slip: SlipReceipt): Promise<void> {
   if (!keeperKeypair) {
     console.log(`   ⚠️  No keeper keypair, skipping on-chain settlement`);
     return;
@@ -226,9 +311,10 @@ async function settleWonSlip(slip: SlipData): Promise<void> {
   console.log(`     Payout: ${slip.potential_payout}`);
 
   // TODO: Build and execute transaction
+  // import { Transaction } from '@mysten/sui/transactions';
   // const tx = new Transaction();
   // tx.moveCall({
-  //   target: `${PACKAGE_ID}::slip_executor::settle_won_slip`,
+  //   target: `${PARLAY_VAULT_PACKAGE}::slip_executor::settle_won_slip`,
   //   arguments: [
   //     tx.object(VAULT_ID),
   //     tx.object(slip.id),
@@ -246,7 +332,7 @@ async function settleWonSlip(slip: SlipData): Promise<void> {
  * Execute settle_lost_slip on-chain
  * This releases the locked bonus to the vault for LPs
  */
-async function settleLostSlip(slip: SlipData): Promise<void> {
+async function settleLostSlip(slip: SlipReceipt): Promise<void> {
   if (!keeperKeypair) {
     console.log(`   ⚠️  No keeper keypair, skipping on-chain settlement`);
     return;
@@ -258,7 +344,7 @@ async function settleLostSlip(slip: SlipData): Promise<void> {
   // TODO: Build and execute transaction
   // const tx = new Transaction();
   // tx.moveCall({
-  //   target: `${PACKAGE_ID}::slip_executor::settle_lost_slip`,
+  //   target: `${PARLAY_VAULT_PACKAGE}::slip_executor::settle_lost_slip`,
   //   arguments: [
   //     tx.object(VAULT_ID),
   //     tx.object(slip.id),
@@ -306,8 +392,9 @@ async function queryPositionRedemptions(): Promise<PositionRedeemedEvent[]> {
 async function main(): Promise<void> {
   console.log('🚀 Parlay Vault Settlement Keeper');
   console.log(`   Network: ${NETWORK}`);
-  console.log(`   Package: ${PACKAGE_ID}`);
+  console.log(`   Parlay Vault package: ${PARLAY_VAULT_PACKAGE}`);
   console.log(`   Vault: ${VAULT_ID}`);
+  console.log(`   OpenSlips: ${OPEN_SLIPS_ID}`);
   console.log('\n⏳ Keeper is running. Press Ctrl+C to stop.\n');
 
   const unsubscribe = await subscribeToOracleEvents();

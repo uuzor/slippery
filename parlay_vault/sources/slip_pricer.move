@@ -2,6 +2,10 @@
 /// 
 /// Uses DeepBook's FLOAT_SCALING (1e9) for probability calculations to match
 /// the oracle pricing model. The house margin and bonuses are applied on top.
+/// 
+/// NOTE: For actual pricing, use predict::get_trade_amounts() to get real
+/// binary position prices (ask/bid) from DeepBook. This module provides
+/// helper calculations for parlay combinations.
 module parlay_vault::slip_pricer {
 
     use std::vector::{Self, length, borrow};
@@ -9,8 +13,15 @@ module parlay_vault::slip_pricer {
     // DeepBook FLOAT_SCALING (must match deepbook_predict::constants)
     const FLOAT_SCALING: u64 = 1_000_000_000;
 
-    /// 3% house margin (applied to joint probability) - 300 basis points
+    /// 3% house margin (applied to joint probability)
+    /// Using basis points: 300 bps = 3% = 0.03
+    /// In FLOAT_SCALING terms: 0.03 * 1e9 = 30_000_000
     const HOUSE_MARGIN_BPS: u64 = 300;
+    
+    /// House margin in FLOAT_SCALING terms (3% = 0.97 factor)
+    /// Calculated as: (10000 - 300) / 10000 = 0.97
+    /// In FLOAT_SCALING: 970_000_000
+    const HOUSE_MARGIN_FACTOR: u64 = 970_000_000;
 
     /// Bonus multiplier for 2-leg parlays (1.0x, no bonus)
     const MULTIPLIER_2_LEG: u64 = 1_000_000_000; // 1.0x in FLOAT_SCALING
@@ -27,13 +38,20 @@ module parlay_vault::slip_pricer {
     /// Maximum legs allowed in a parlay
     const MAX_LEGS: u64 = 4;
 
-    /// One leg of a parlay market - mirrors DeepBook MarketKey structure
-    /// All fields are needed to create the MarketKey for DeepBook pricing
+    /// One leg of a parlay market
+    /// The `ask_price` field should contain the DeepBook binary position price
+    /// (returned by predict::get_trade_amounts), NOT the raw strike level.
+    /// 
+    /// DeepBook prices are in FLOAT_SCALING (1e9) representing probabilities:
+    /// - 500_000_000 = 50% probability (even odds)
+    /// - 600_000_000 = 60% probability
+    /// - etc.
     public struct MarketLeg has copy, drop, store {
         oracle_id: vector<u8>,   // ID of the OracleSVI (as bytes)
         expiry: u64,             // Expiry timestamp in milliseconds
         strike: u64,             // Strike price (in FLOAT_SCALING)
         is_up: bool,             // true = UP position, false = DOWN position
+        ask_price: u64,          // DeepBook ask price for this leg (probability in 1e9)
     }
 
     /// Get minimum number of legs
@@ -46,7 +64,6 @@ module parlay_vault::slip_pricer {
     public fun float_scaling(): u64 { FLOAT_SCALING }
 
     /// Get probability scale for odds conversion
-    /// Note: DeepBook returns prices in FLOAT_SCALING (1e9), not decimal odds
     public fun probability_scale(): u64 { FLOAT_SCALING }
 
     /// Create a MarketLeg from individual components
@@ -54,13 +71,15 @@ module parlay_vault::slip_pricer {
         oracle_id: vector<u8>,
         expiry: u64,
         strike: u64,
-        is_up: bool
+        is_up: bool,
+        ask_price: u64
     ): MarketLeg {
         MarketLeg {
             oracle_id,
             expiry,
             strike,
             is_up,
+            ask_price,
         }
     }
 
@@ -84,6 +103,11 @@ module parlay_vault::slip_pricer {
         leg.is_up
     }
 
+    /// Get ask price from a leg (DeepBook binary position price)
+    public fun get_ask_price(leg: &MarketLeg): u64 {
+        leg.ask_price
+    }
+
     /// Convert DeepBook price (FLOAT_SCALING) to probability
     /// DeepBook returns prices directly as probabilities (0 to 1e9)
     public fun price_to_probability(price: u64): u64 {
@@ -98,32 +122,35 @@ module parlay_vault::slip_pricer {
     }
 
     /// Calculate joint probability of multiple independent events
+    /// 
+    /// IMPORTANT: This uses the ask_price field which should be the actual
+    /// DeepBook binary position price (probability), NOT the raw strike level.
+    /// 
     /// Probabilities are in FLOAT_SCALING (1e9)
     public fun compute_joint_probability(legs: &vector<MarketLeg>): u64 {
         let num_legs = length(legs);
         if (num_legs == 0) return 0;
 
         // For parlays, we multiply probabilities
-        // Each leg price represents probability of winning
-        // Note: We use geometric mean for fairness, product for house edge
+        // Each leg ask_price represents probability of winning
         let mut joint_prob = FLOAT_SCALING;
         let mut i = 0;
         while (i < num_legs) {
             let leg = borrow(legs, i);
-            // DeepBook prices are already probabilities
-            // For joint probability, multiply them
-            // joint_prob = joint_prob * leg_price / FLOAT_SCALING
-            joint_prob = (joint_prob * leg.strike) / FLOAT_SCALING;
+            // joint_prob = joint_prob * ask_price / FLOAT_SCALING
+            joint_prob = (joint_prob * leg.ask_price) / FLOAT_SCALING;
             i = i + 1;
         };
         joint_prob
     }
 
     /// Apply house margin to joint probability
-    /// Reduces the probability by HOUSE_MARGIN_BPS basis points
+    /// 
+    /// FIXED: Now uses the correct basis points calculation.
+    /// The margin_factor is 970_000_000 (97% = 100% - 3% margin)
+    /// This means: adjusted_prob = joint_prob * 0.97
     public fun apply_house_margin(joint_prob: u64): u64 {
-        let margin_factor = FLOAT_SCALING - HOUSE_MARGIN_BPS;
-        (joint_prob * margin_factor) / FLOAT_SCALING
+        (joint_prob * HOUSE_MARGIN_FACTOR) / FLOAT_SCALING
     }
 
     /// Calculate combined odds from legs
