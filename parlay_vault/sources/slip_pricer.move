@@ -59,14 +59,18 @@ module parlay_vault::slip_pricer {
         MULT_2_LEG
     }
 
+    /// Calculate payout with overflow protection
+    /// Using: (stake * odds / FLOAT_SCALING) * mult / FLOAT_SCALING
     public fun calculate_payout(stake: u64, odds: u64, mult: u64): u64 {
-        (stake * odds * mult) / (FLOAT_SCALING * FLOAT_SCALING)
+        let intermediate = (stake * odds) / FLOAT_SCALING;
+        (intermediate * mult) / FLOAT_SCALING
     }
 
+    /// Calculate bonus with overflow protection
     public fun calculate_bonus(stake: u64, odds: u64, mult: u64): u64 {
         let base = (stake * odds) / FLOAT_SCALING;
-        let bonus = (stake * odds * mult) / (FLOAT_SCALING * FLOAT_SCALING);
-        bonus - base
+        let bonus = ((stake * odds) / FLOAT_SCALING * mult) / FLOAT_SCALING;
+        if (bonus > base) bonus - base else 0
     }
 
     public fun preview_slip(l: &vector<MarketLeg>, stake: u64): (u64, u64, u64, u64) {

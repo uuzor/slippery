@@ -12,7 +12,7 @@ module parlay_vault::slip_executor {
         calculate_payout, calculate_bonus, min_legs, max_legs
     };
 
-    const DEEPBOOK_PREDICT_PKG: address = @0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab8739c65d6e57f5c785138;
+    const DEEPBOOK_PREDICT_PKG: address = @0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138;
 
     const E_TOO_FEW_LEGS: u64 = 1;
     const E_TOO_MANY_LEGS: u64 = 2;
@@ -43,8 +43,8 @@ module parlay_vault::slip_executor {
         OpenSlips { id: new(ctx), slips: vector[] }
     }
 
-    public fun place_slip(
-        vault: &mut Vault,
+    public fun place_slip<Q>(
+        vault: &mut Vault<Q>,
         open_slips: &mut OpenSlips,
         legs: vector<MarketLeg>,
         stake: u64,
@@ -84,7 +84,7 @@ module parlay_vault::slip_executor {
         receipt
     }
 
-    public fun settle_won_slip(vault: &mut Vault, receipt: SlipReceipt) {
+    public fun settle_won_slip<Q>(vault: &mut Vault<Q>, receipt: SlipReceipt) {
         let SlipReceipt {
             id,
             owner: _,
@@ -100,7 +100,7 @@ module parlay_vault::slip_executor {
         object::delete(id);
     }
 
-    public fun settle_lost_slip(vault: &mut Vault, receipt: SlipReceipt) {
+    public fun settle_lost_slip<Q>(vault: &mut Vault<Q>, receipt: SlipReceipt) {
         let SlipReceipt {
             id,
             owner: _,
