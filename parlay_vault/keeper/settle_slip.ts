@@ -1,54 +1,44 @@
 /**
- * Settlement Keeper — Watches DeepBook Predict oracle events and settles slips
+ * Parlay Vault Settlement Keeper
  * 
- * DeepBook Predict Integration:
- * - Subscribes to OracleSettled events from deepbook_predict::oracle
- * - Queries PositionRedeemed events for keeper's positions
- * - Settles parlay slips based on oracle settlement prices
- * - Distributes payouts or releases locked bonuses to vault
+ * Architecture: Keeper-owned manager pattern
+ * - Keeper creates PredictManager on startup
+ * - Keeper executes slip placements via PTB
+ * - Keeper settles via redeem_permissionless
  * 
- * Events to watch:
- * - deepbook_predict::oracle::OracleSettled - oracle price finalized
- * - deepbook_predict::predict::PositionRedeemed - position settled
+ * Events watched:
+ * - SlipPending (user deposited stake, ready for execution)
+ * - OracleSettled (oracle expired, ready for settlement)
  */
 
-import { SuiClient } from '@mysten/sui.js/client';
-import { Ed25519Keypair } from '@mysten/sui.js/keypairs/ed25519';
+import { SuiClient, getFullnodeUrl } from '@mysten/sui/client';
+import { Ed25519Keypair } from '@mysten/sui/keypairs/ed25519';
+import { Transaction } from '@mysten/sui/transactions';
 
-// Configuration
 const NETWORK = 'testnet';
-const PACKAGE_ID = '0xYourPackageId'; // TODO: Set after deployment
-const VAULT_ID = '0xYourVaultId'; // TODO: Set after deployment
 
-// DeepBook Predict package (testnet deployment)
-const DEEPBOOK_PREDICT_PACKAGE = '0x9ae0e853e7f39f893dc2d64386c12bb1d570f4f0bb3d3d63b40fd1b3ddf6b3f8';
+// DeepBook Predict package (testnet)
+const DEEPBOOK_PKG = '0xf5ea2b3749c65d6e56507cc35388719aadb28f9cab873696a2f8687f5c785138';
+const DEEPBOOK_OBJ = '0xc8736204d12f0a7277c86388a68bf8a194b0a14c5538ad13f22cbd8e2a38028a';
 
-// Network URLs
-const TESTNET_URL = 'https://fullnode.testnet.sui.io:443';
+// Parlay Vault package (set after deployment)
+const VAULT_PKG = '0xYourPackageId';
+const VAULT_ID = '0xYourVaultId';
 
-// Initialize Sui client
-const client = new SuiClient({ 
-  url: TESTNET_URL,
-});
+const client = new SuiClient({ url: getFullnodeUrl(NETWORK) });
 
 interface MarketLeg {
-  oracle_id: string;   // ID of the OracleSVI
-  expiry: number;      // Expiry timestamp in milliseconds
-  strike: number;      // Strike price (in FLOAT_SCALING = 1e9)
-  is_up: boolean;      // true = UP position, false = DOWN position
+  oracle_id: string;
+  expiry: number;
+  strike: number;
+  is_up: boolean;
+  ask_price: number;
 }
 
-interface SlipData {
-  id: string;
+interface PendingSlipEvent {
+  slip_id: string;
   owner: string;
-  legs: MarketLeg[];
-  predict_ids: string[];
   stake: number;
-  combined_odds: number;
-  bonus_multiplier: number;
-  potential_payout: number;
-  locked_amount: number;
-  status: 'open' | 'won' | 'lost' | 'settled';
 }
 
 interface OracleSettledEvent {
@@ -58,264 +48,235 @@ interface OracleSettledEvent {
   timestamp: number;
 }
 
-interface PositionRedeemedEvent {
-  predict_id: string;
-  manager_id: string;
-  trader: string;
-  oracle_id: string;
-  expiry: number;
-  strike: number;
-  is_up: boolean;
-  quantity: number;
-  payout: number;
-  bid_price: number;
-  is_settled: boolean;
-}
-
-// Keeper keypair (from environment or config)
+// Keeper state
 let keeperKeypair: Ed25519Keypair | null = null;
-if (process.env.KEEPER_PRIVATE_KEY) {
+let keeperAddress: string = '';
+let managerId: string | null = null;
+
+async function initKeeper() {
+  if (!process.env.KEEPER_PRIVATE_KEY) {
+    console.log('⚠️  No KEEPER_PRIVATE_KEY set - running in read-only mode');
+    return;
+  }
+  
   keeperKeypair = Ed25519Keypair.fromSecretKey(
     Buffer.from(process.env.KEEPER_PRIVATE_KEY, 'hex')
   );
-  console.log('✅ Keeper keypair loaded from KEEPER_PRIVATE_KEY');
-} else {
-  console.log('⚠️  No KEEPER_PRIVATE_KEY set - running in read-only mode');
+  keeperAddress = keeperKeypair.toSuiAddress();
+  console.log(`✅ Keeper keypair loaded: ${keeperAddress}`);
+  
+  // Check if manager exists, create if not
+  await ensureManager();
+}
+
+async function ensureManager() {
+  // TODO: Query on-chain to check if manager exists for keeper
+  // For now, create on first startup if not set
+  if (!managerId) {
+    console.log('📝 Creating PredictManager...');
+    const tx = new Transaction();
+    tx.moveCall({
+      target: `${DEEPBOOK_PKG}::predict::create_manager`,
+    });
+    
+    const result = await client.signAndExecuteTransaction({
+      transaction: tx,
+      signer: keeperKeypair!,
+      options: { showEffects: true },
+    });
+    
+    // Extract manager ID from effects
+    // In production, parse the created object
+    console.log('⚠️  Manual manager ID setup required');
+    console.log('Transaction effects:', JSON.stringify(result.effects, null, 2));
+  }
 }
 
 /**
- * Subscribe to OracleSettled events from DeepBook Predict
- * This is the trigger for settling parlay slips
+ * Execute a pending slip - builds PTB to:
+ * 1. Release SUI from vault escrow
+ * 2. Deposit into keeper's manager
+ * 3. Mint positions on DeepBook
  */
-async function subscribeToOracleEvents(): Promise<() => void> {
-  console.log('🏃 Starting Settlement Keeper...');
-  console.log(`   DeepBook Predict package: ${DEEPBOOK_PREDICT_PACKAGE}`);
+async function executePendingSlip(slipId: string, legs: MarketLeg[]) {
+  if (!keeperKeypair) {
+    console.log('⚠️  No keeper keypair, skipping execution');
+    return;
+  }
+  
+  console.log(`\n🚀 Executing slip ${slipId}`);
+  
+  const tx = new Transaction();
+  
+  // Step 1: Release SUI from vault escrow
+  // const [suiCoin] = tx.moveCall({
+  //   target: `${VAULT_PKG}::parlay_vault::release_pending_stake`,
+  //   arguments: [tx.object(VAULT_ID), tx.pure(slipId)],
+  // });
+  
+  // Step 2: Deposit into keeper's manager
+  // tx.moveCall({
+  //   target: `${DEEPBOOK_PKG}::predict_manager::deposit`,
+  //   arguments: [tx.object(managerId!), suiCoin],
+  // });
+  
+  // Step 3: Mint each leg
+  // for (const leg of legs) {
+  //   const marketKey = buildMarketKey(leg);
+  //   tx.moveCall({
+  //     target: `${DEEPBOOK_PKG}::predict::mint`,
+  //     arguments: [
+  //       tx.object(DEEPBOOK_OBJ),
+  //       tx.object(managerId!),
+  //       tx.pure(marketKey),
+  //       tx.pure(leg.ask_price),
+  //       tx.object('0x5'), // Clock
+  //     ],
+  //   });
+  // }
+  
+  // Step 4: Finalize slip
+  // tx.moveCall({
+  //   target: `${VAULT_PKG}::parlay_vault::finalize_slip`,
+  //   arguments: [tx.object(VAULT_ID), tx.pure(slipId)],
+  // });
+  
+  console.log('   PTB constructed (not submitted - implement actual calls)');
+  
+  // const result = await client.signAndExecuteTransaction({
+  //   transaction: tx,
+  //   signer: keeperKeypair,
+  // });
+  // console.log(`   ✅ Executed: ${result.digest}`);
+}
 
-  // Subscribe to OracleSettled events
-  // Filter: module = "oracle" from DEEPBOOK_PREDICT_PACKAGE
+/**
+ * Settle a slip after oracle settlement
+ */
+async function settleSlip(slipId: string, oracleEvent: OracleSettledEvent) {
+  if (!keeperKeypair) {
+    console.log('⚠️  No keeper keypair, skipping settlement');
+    return;
+  }
+  
+  console.log(`\n💰 Settling slip ${slipId}`);
+  
+  // Step 1: Redeem all positions for this oracle
+  // for (const leg of slip.legs) {
+  //   if (leg.oracle_id === oracleEvent.oracle_id) {
+  //     const tx = new Transaction();
+  //     tx.moveCall({
+  //       target: `${DEEPBOOK_PKG}::predict::redeem_permissionless`,
+  //       arguments: [
+  //         tx.object(DEEPBOOK_OBJ),
+  //         tx.object(managerId!),
+  //         tx.pure(leg.oracle_id),
+  //         tx.pure(leg.expiry),
+  //         tx.pure(leg.strike),
+  //         tx.pure(leg.is_up),
+  //         tx.pure(leg.ask_price),
+  //         tx.object('0x5'),
+  //       ],
+  //     });
+  //     await client.signAndExecuteTransaction({
+  //       transaction: tx,
+  //       signer: keeperKeypair,
+  //     });
+  //   }
+  // }
+  
+  // Step 2: Withdraw from manager
+  // const withdrawTx = new Transaction();
+  // withdrawTx.moveCall({
+  //   target: `${DEEPBOOK_PKG}::predict_manager::withdraw`,
+  //   arguments: [tx.object(managerId!), tx.pure(amount)],
+  // });
+  
+  // Step 3: Call vault settle
+  // const settleTx = new Transaction();
+  // settleTx.moveCall({
+  //   target: `${VAULT_PKG}::parlay_vault::settle_won_slip`,
+  //   arguments: [tx.object(VAULT_ID), tx.pure(slipId), tx.pure(payout)],
+  // });
+  
+  console.log('   Settlement PTB constructed (not submitted)');
+}
+
+/**
+ * Subscribe to SlipPending events
+ */
+async function subscribeToPendingSlips() {
+  console.log('👀 Subscribing to SlipPending events...');
+  
   const unsubscribe = await client.subscribeEvent({
     filter: {
       MoveEventModule: {
-        module: 'oracle',
-        package: DEEPBOOK_PREDICT_PACKAGE,
+        module: 'parlay_vault',
+        package: VAULT_PKG,
       },
     },
     onMessage: async (event: any) => {
-      try {
-        const eventData = event.parsedJson as OracleSettledEvent;
-        console.log(`\n📡 OracleSettled event detected:`);
-        console.log(`   Oracle ID: ${eventData.oracle_id}`);
-        console.log(`   Settlement price: ${eventData.settlement_price} (${(eventData.settlement_price / 1e9).toFixed(4)}x)`);
-        console.log(`   Timestamp: ${new Date(eventData.timestamp).toISOString()}`);
+      if (event.type.includes('SlipPending')) {
+        const slipEvent = event.parsedJson as PendingSlipEvent;
+        console.log(`\n📋 New pending slip: ${slipEvent.slip_id}`);
+        console.log(`   Owner: ${slipEvent.owner}`);
+        console.log(`   Stake: ${slipEvent.stake}`);
         
-        await processOracleSettlement(eventData);
-      } catch (error) {
-        console.error('❌ Error processing oracle event:', error);
+        // TODO: Fetch slip details and execute
+        // const legs = await fetchSlipLegs(slipEvent.slip_id);
+        // await executePendingSlip(slipEvent.slip_id, legs);
       }
     },
   });
-
-  console.log('👀 Subscribed to OracleSettled events...');
-  console.log('   Module: deepbook_predict::oracle\n');
-
+  
   return unsubscribe;
 }
 
 /**
- * Process an oracle settlement:
- * 1. Find all open slips containing this oracle
- * 2. For each slip, determine if all legs won/lost
- * 3. Execute settle_won_slip or settle_lost_slip
+ * Subscribe to OracleSettled events
  */
-async function processOracleSettlement(oracleEvent: OracleSettledEvent): Promise<void> {
-  console.log(`\n🔄 Processing settlement for oracle ${oracleEvent.oracle_id}`);
-
-  const affectedSlips = await getSlipsForOracle(oracleEvent.oracle_id);
-  console.log(`📋 Found ${affectedSlips.length} slips to process`);
-
-  for (const slip of affectedSlips) {
-    await settleSlip(slip, oracleEvent);
-  }
-}
-
-/**
- * Query on-chain data for slips containing a specific oracle
- * TODO: Implement actual on-chain query
- */
-async function getSlipsForOracle(oracleId: string): Promise<SlipData[]> {
-  // TODO: Query the vault or OpenSlips object for slips with this oracle
-  // This would use sui client to query the vault's open slips
-  // Example query structure:
-  // const result = await client.query({
-  //   filter: { MatchAny: [...] },
-  //   type: `${PACKAGE_ID}::slip_executor::SlipReceipt`,
-  // });
-  return [];
-}
-
-/**
- * Determine if a slip won based on oracle settlement
- */
-function determineSlipOutcome(slip: SlipData, oracleEvent: OracleSettledEvent): boolean {
-  // Find the leg for this oracle
-  const leg = slip.legs.find(l => l.oracle_id === oracleEvent.oracle_id);
-  if (!leg) return false;
-
-  // Settlement price is in FLOAT_SCALING (1e9)
-  // Strike is also in FLOAT_SCALING
-  const settlementPrice = oracleEvent.settlement_price;
-  const strike = leg.strike;
-
-  // UP wins if settlement > strike
-  // DOWN wins if settlement <= strike
-  const legWon = leg.is_up 
-    ? settlementPrice > strike 
-    : settlementPrice <= strike;
-
-  console.log(`   Leg: ${leg.is_up ? 'UP' : 'DOWN'} @ strike ${(strike / 1e9).toFixed(4)}`);
-  console.log(`   Settlement: ${(settlementPrice / 1e9).toFixed(4)}`);
-  console.log(`   Result: ${legWon ? 'WON' : 'LOST'}`);
-
-  return legWon;
-}
-
-/**
- * Settle a single slip
- */
-async function settleSlip(slip: SlipData, oracleEvent: OracleSettledEvent): Promise<void> {
-  console.log(`\n💰 Settling slip ${slip.id} for ${slip.owner}`);
-
-  const legWon = determineSlipOutcome(slip, oracleEvent);
+async function subscribeToOracleEvents() {
+  console.log('👀 Subscribing to OracleSettled events...');
   
-  // Check if all legs are resolved (we need all oracles to settle)
-  const allLegsResolved = slip.legs.every(leg => {
-    // In real implementation, check if oracle is settled
-    return true; // TODO: Check oracle settlement status
-  });
-
-  if (!allLegsResolved) {
-    console.log(`   ⏳ Not all legs resolved yet, skipping...`);
-    return;
-  }
-
-  // Check if all legs won
-  // For a parlay, ALL legs must win
-  // TODO: Implement actual win/loss determination
-  const allLegsWon = true; // TODO: Check all legs
-
-  if (allLegsWon) {
-    console.log(`✅ Slip ${slip.id} settled: WON`);
-    await settleWonSlip(slip);
-  } else {
-    console.log(`❌ Slip ${slip.id} settled: LOST`);
-    await settleLostSlip(slip);
-  }
-}
-
-/**
- * Execute settle_won_slip on-chain
- * This releases the locked bonus and distributes payout
- */
-async function settleWonSlip(slip: SlipData): Promise<void> {
-  if (!keeperKeypair) {
-    console.log(`   ⚠️  No keeper keypair, skipping on-chain settlement`);
-    return;
-  }
-
-  console.log(`  🎉 Distributing payout to ${slip.owner}`);
-  console.log(`     Payout: ${slip.potential_payout}`);
-
-  // TODO: Build and execute transaction
-  // const tx = new Transaction();
-  // tx.moveCall({
-  //   target: `${PACKAGE_ID}::slip_executor::settle_won_slip`,
-  //   arguments: [
-  //     tx.object(VAULT_ID),
-  //     tx.object(slip.id),
-  //   ],
-  // });
-  // await client.signAndExecuteTransaction({
-  //   transaction: tx,
-  //   signer: keeperKeypair,
-  // });
-  
-  console.log(`  ✅ Transaction would be submitted`);
-}
-
-/**
- * Execute settle_lost_slip on-chain
- * This releases the locked bonus to the vault for LPs
- */
-async function settleLostSlip(slip: SlipData): Promise<void> {
-  if (!keeperKeypair) {
-    console.log(`   ⚠️  No keeper keypair, skipping on-chain settlement`);
-    return;
-  }
-
-  console.log(`  📈 Releasing locked bonus to vault`);
-  console.log(`     Locked amount: ${slip.locked_amount}`);
-
-  // TODO: Build and execute transaction
-  // const tx = new Transaction();
-  // tx.moveCall({
-  //   target: `${PACKAGE_ID}::slip_executor::settle_lost_slip`,
-  //   arguments: [
-  //     tx.object(VAULT_ID),
-  //     tx.object(slip.id),
-  //   ],
-  // });
-  // await client.signAndExecuteTransaction({
-  //   transaction: tx,
-  //   signer: keeperKeypair,
-  // });
-  
-  console.log(`  ✅ Transaction would be submitted`);
-}
-
-/**
- * Query historical PositionRedeemed events for keeper's positions
- * This is an alternative approach to settle positions
- */
-async function queryPositionRedemptions(): Promise<PositionRedeemedEvent[]> {
-  console.log(`🔍 Querying PositionRedeemed events...`);
-
-  try {
-    const events = await client.queryEvents({
-      query: {
-        MoveEventModule: {
-          module: 'predict',
-          package: DEEPBOOK_PREDICT_PACKAGE,
-        },
+  const unsubscribe = await client.subscribeEvent({
+    filter: {
+      MoveEventModule: {
+        module: 'oracle',
+        package: DEEPBOOK_PKG,
       },
-      order: 'descending',
-      limit: 100,
-    });
-
-    return events.data
-      .filter(e => e.type.includes('PositionRedeemed'))
-      .map(e => e.parsedJson as PositionRedeemedEvent);
-  } catch (error) {
-    console.error('❌ Error querying position redemptions:', error);
-    return [];
-  }
+    },
+    onMessage: async (event: any) => {
+      if (event.type.includes('OracleSettled')) {
+        const oracleEvent = event.parsedJson as OracleSettledEvent;
+        console.log(`\n📡 Oracle settled: ${oracleEvent.oracle_id}`);
+        console.log(`   Price: ${oracleEvent.settlement_price} (${(oracleEvent.settlement_price / 1e9).toFixed(4)}x)`);
+        
+        // Find and settle affected slips
+        // await settleAffectedSlips(oracleEvent);
+      }
+    },
+  });
+  
+  return unsubscribe;
 }
 
-/**
- * Main entry point
- */
-async function main(): Promise<void> {
-  console.log('🚀 Parlay Vault Settlement Keeper');
+async function main() {
+  console.log('🚀 Parlay Vault Keeper');
   console.log(`   Network: ${NETWORK}`);
-  console.log(`   Package: ${PACKAGE_ID}`);
   console.log(`   Vault: ${VAULT_ID}`);
-  console.log('\n⏳ Keeper is running. Press Ctrl+C to stop.\n');
-
-  const unsubscribe = await subscribeToOracleEvents();
-
-  // Keep process running
+  console.log(`   DeepBook: ${DEEPBOOK_PKG}`);
+  
+  await initKeeper();
+  
+  const unsubPending = await subscribeToPendingSlips();
+  const unsubOracle = await subscribeToOracleEvents();
+  
+  console.log('\n⏳ Keeper running. Press Ctrl+C to stop.\n');
+  
   process.on('SIGINT', () => {
-    console.log('\n🛑 Shutting down keeper...');
-    unsubscribe();
+    console.log('\n🛑 Shutting down...');
+    unsubPending();
+    unsubOracle();
     process.exit(0);
   });
 }
