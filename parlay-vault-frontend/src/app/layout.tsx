@@ -1,19 +1,26 @@
-import type { Metadata } from "next";
-import "./globals.css";
+import type { Metadata } from 'next';
+import './globals.css';
+import { ZkLoginProvider } from './lib/zklogin';
 
 export const metadata: Metadata = {
-  title: "Parlay Vault — DeepBook Predict on Sui",
-  description: "A composable parlay vault on DeepBook Predict. LPs earn yield from PLP + losing slips. Users combine 2-4 prediction markets with correct joint probability pricing.",
+  title: 'Parlay Vault — Sports Parlay Betting on Sui',
+  description:
+    'Pick 2–4 sports outcomes, stack them into one parlay slip, win big. Backed by DeepBook Predict on Sui. Sign in with Google. Zero gas fees.',
+  openGraph: {
+    title: 'Parlay Vault',
+    description: 'Sports parlay betting powered by DeepBook Predict on Sui.',
+    siteName: 'Parlay Vault',
+  },
 };
 
-export default function RootLayout({
-  children,
-}: Readonly<{
-  children: React.ReactNode;
-}>) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body style={{ background: '#0a0a0a' }}>
+        <ZkLoginProvider>
+          {children}
+        </ZkLoginProvider>
+      </body>
     </html>
   );
 }
