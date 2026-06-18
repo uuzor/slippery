@@ -13,7 +13,7 @@ const NAV_ITEMS = [
 
 export default function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { address, isLoading, loginWithGoogle, logout } = useZkLogin();
+  const { address, isLoading, loginWithGoogle, logout, resetLogin } = useZkLogin();
 
   const shortAddress = address
     ? `${address.slice(0, 6)}...${address.slice(-4)}`
@@ -49,7 +49,20 @@ export default function Navbar() {
           {address ? (
             <div style={styles.loggedIn}>
               <span style={styles.addressPill}>{shortAddress}</span>
-              <button className="btn-connect" onClick={logout} style={{ background: '#222', color: '#9b9b9b' }}>
+              <span className="hidden">{address}</span>
+              <button
+                className="btn-connect"
+                onClick={resetLogin}
+                title="Clear cached proof and session; sign in again to mint a fresh zkLogin proof."
+                style={{ background: '#222', color: '#9b9b9b' }}
+              >
+                Reset
+              </button>
+              <button
+                className="btn-connect"
+                onClick={logout}
+                style={{ background: '#222', color: '#9b9b9b' }}
+              >
                 Sign out
               </button>
             </div>
@@ -90,9 +103,22 @@ export default function Navbar() {
             </Link>
           ))}
           {address ? (
-            <button className="btn-connect" onClick={logout} style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}>
-              Sign out ({shortAddress})
-            </button>
+            <>
+              <button
+                className="btn-connect"
+                onClick={resetLogin}
+                style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
+              >
+                Reset login ({shortAddress})
+              </button>
+              <button
+                className="btn-connect"
+                onClick={logout}
+                style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
+              >
+                Sign out ({shortAddress})
+              </button>
+            </>
           ) : (
             <button className="btn-connect" onClick={loginWithGoogle} disabled={isLoading} style={{ width: '100%', justifyContent: 'center' }}>
               {isLoading ? 'Signing in...' : 'Sign in with Google'}

@@ -82,9 +82,12 @@ export function defaultPredictConfig(
 }
 
 export function createPredictClient(network: PredictNetwork): SuiJsonRpcClient {
+  const overrideUrl = process.env.SUI_RPC_UPSTREAM_URL;
   return new SuiJsonRpcClient({
     network,
-    url: getJsonRpcFullnodeUrl(network),
+    url: overrideUrl && overrideUrl.length > 0
+      ? overrideUrl
+      : getJsonRpcFullnodeUrl(network),
   });
 }
 

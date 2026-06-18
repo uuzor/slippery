@@ -96,6 +96,7 @@ interface ZkLoginCtx extends ZkLoginState {
   isReady: boolean;
   loginWithGoogle: () => Promise<void>;
   logout: () => void;
+  resetLogin: () => void;
   signAndExecuteTransaction: (input: SignAndExecuteInput) => Promise<SuiTransactionBlockResponse>;
 }
 
@@ -341,6 +342,16 @@ export function ZkLoginProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
+  const resetLogin = useCallback(() => {
+    // Clear everything including salts so the next login fetches a brand-new
+    // proof from the prover. Used as a recovery path when the cached proof
+    // fails Groth16 verification on chain (dev prover flakiness).
+    Object.keys(localStorage)
+      .filter((k) => k.startsWith(L_SALT))
+      .forEach((k) => localStorage.removeItem(k));
+    logout();
+  }, [logout]);
+
   const signAndExecuteTransaction = useCallback(
     async ({ transaction, options }: SignAndExecuteInput) => {
       const session = loadSession();
@@ -371,14 +382,31 @@ export function ZkLoginProvider({ children }: { children: ReactNode }) {
         userSignature,
       });
 
-      return SUI_CLIENT.executeTransactionBlock({
-        transactionBlock: bytes,
-        signature: zkLoginSignature,
-        options: {
-          ...DEFAULT_EXECUTE_OPTIONS,
-          ...options,
-        },
-      });
+      try {
+        return await SUI_CLIENT.executeTransactionBlock({
+          transactionBlock: bytes,
+          signature: zkLoginSignature,
+          options: {
+            ...DEFAULT_EXECUTE_OPTIONS,
+            ...options,
+          },
+        });
+      } catch (txError) {
+        const message =
+          txError instanceof Error ? txError.message : String(txError);
+        // The Sui validator returns this exact string when Groth16 verification
+        // fails on the zkLogin proof points. The proof is bound to the
+        // ephemeral keypair / nonce, so the only fix is a fresh OAuth round-trip
+        // that mints a new proof. Invalidate the cached proof so the next
+        // login fetches a new one.
+        if (/Groth16 proof verify failed/i.test(message)) {
+          localStorage.removeItem(L_PROOF);
+          throw new Error(
+            'zkLogin proof failed verification (this is a known dev-prover flakiness). Sign in again to mint a fresh proof.',
+          );
+        }
+        throw txError;
+      }
     },
     [state.address],
   );
@@ -389,6 +417,7 @@ export function ZkLoginProvider({ children }: { children: ReactNode }) {
     isReady: Boolean(state.address && state.jwt && loadStoredProof() && loadSession()),
     loginWithGoogle,
     logout,
+    resetLogin,
     signAndExecuteTransaction,
   };
 
