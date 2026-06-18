@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 
-import { useZkLogin } from '../lib/zklogin';
+import { useCurrentAccount } from '@mysten/dapp-kit';
 import {
   previewConstants,
   previewSlipFromQuotes,
@@ -75,7 +75,9 @@ function marketDefaultStrike(market: PredictMarket): bigint {
 }
 
 export default function MarketsClient() {
-  const { address, isReady } = useZkLogin();
+  const currentAccount = useCurrentAccount();
+  const address = currentAccount?.address ?? null;
+  const isReady = Boolean(currentAccount);
   const { data: markets, isLoading: isMarketsLoading, error: marketsError, refresh: refreshMarkets } =
     usePredictMarkets('BTC', 8, 2, 0);
   const { data: quoteCoins, refresh: refreshCoins } = useOwnedQuoteCoins(address, 45_000);

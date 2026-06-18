@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
-import { ZkLoginProvider } from './lib/zklogin';
+import { Providers } from './lib/providers';
 
 export const metadata: Metadata = {
   title: 'Parlay Vault — Sports Parlay Betting on Sui',
@@ -17,9 +17,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body style={{ background: '#0a0a0a' }}>
-        <ZkLoginProvider>
+        <Providers>
           {children}
-        </ZkLoginProvider>
+        </Providers>
       </body>
     </html>
   );

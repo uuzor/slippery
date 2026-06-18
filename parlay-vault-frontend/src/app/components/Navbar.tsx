@@ -1,8 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useZkLogin } from '../lib/zklogin';
+import {
+  useConnectWallet,
+  useCurrentAccount,
+  useDisconnectWallet,
+  useWallets,
+} from '@mysten/dapp-kit';
+import { isEnokiWallet } from '@mysten/enoki';
 
 const NAV_ITEMS = [
   { label: 'Markets', href: '/markets' },
@@ -13,11 +19,30 @@ const NAV_ITEMS = [
 
 export default function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { address, isLoading, loginWithGoogle, logout, resetLogin } = useZkLogin();
 
-  const shortAddress = address
-    ? `${address.slice(0, 6)}...${address.slice(-4)}`
-    : null;
+  const currentAccount = useCurrentAccount();
+  const { mutate: disconnect, isPending: isDisconnecting } = useDisconnectWallet();
+  const { mutate: connect, isPending: isConnecting } = useConnectWallet();
+  const enokiWallets = useWallets().filter(isEnokiWallet);
+  const googleWallet = enokiWallets.find((w) => w.provider === 'google');
+
+  const shortAddress = useMemo(() => {
+    if (!currentAccount?.address) return null;
+    return `${currentAccount.address.slice(0, 6)}...${currentAccount.address.slice(-4)}`;
+  }, [currentAccount?.address]);
+
+  function handleSignIn() {
+    if (!googleWallet) return;
+    connect({ wallet: googleWallet });
+  }
+
+  const isLoading = isConnecting || isDisconnecting;
+  const signInDisabled = isLoading || !googleWallet;
+  const signInLabel = isConnecting
+    ? 'Opening Google...'
+    : !googleWallet
+      ? 'Loading...'
+      : 'Sign in with Google';
 
   return (
     <nav style={styles.nav}>
@@ -46,33 +71,25 @@ export default function Navbar() {
             <span style={styles.suiLabel}>Sui Network</span>
           </div>
 
-          {address ? (
+          {currentAccount?.address ? (
             <div style={styles.loggedIn}>
               <span style={styles.addressPill}>{shortAddress}</span>
-              <span className="hidden">{address}</span>
               <button
                 className="btn-connect"
-                onClick={resetLogin}
-                title="Clear cached proof and session; sign in again to mint a fresh zkLogin proof."
+                onClick={() => disconnect()}
+                disabled={isDisconnecting}
                 style={{ background: '#222', color: '#9b9b9b' }}
               >
-                Reset
-              </button>
-              <button
-                className="btn-connect"
-                onClick={logout}
-                style={{ background: '#222', color: '#9b9b9b' }}
-              >
-                Sign out
+                {isDisconnecting ? 'Signing out...' : 'Sign out'}
               </button>
             </div>
           ) : (
             <button
               className="btn-connect"
-              onClick={loginWithGoogle}
-              disabled={isLoading}
+              onClick={handleSignIn}
+              disabled={signInDisabled}
             >
-              {isLoading ? 'Signing in...' : 'Sign in with Google'}
+              {signInLabel}
             </button>
           )}
 
@@ -102,26 +119,23 @@ export default function Navbar() {
               {item.label}
             </Link>
           ))}
-          {address ? (
-            <>
-              <button
-                className="btn-connect"
-                onClick={resetLogin}
-                style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
-              >
-                Reset login ({shortAddress})
-              </button>
-              <button
-                className="btn-connect"
-                onClick={logout}
-                style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
-              >
-                Sign out ({shortAddress})
-              </button>
-            </>
+          {currentAccount?.address ? (
+            <button
+              className="btn-connect"
+              onClick={() => disconnect()}
+              disabled={isDisconnecting}
+              style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
+            >
+              {isDisconnecting ? 'Signing out...' : `Sign out (${shortAddress})`}
+            </button>
           ) : (
-            <button className="btn-connect" onClick={loginWithGoogle} disabled={isLoading} style={{ width: '100%', justifyContent: 'center' }}>
-              {isLoading ? 'Signing in...' : 'Sign in with Google'}
+            <button
+              className="btn-connect"
+              onClick={handleSignIn}
+              disabled={signInDisabled}
+              style={{ width: '100%', justifyContent: 'center' }}
+            >
+              {signInLabel}
             </button>
           )}
         </div>

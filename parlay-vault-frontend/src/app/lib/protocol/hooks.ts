@@ -2,7 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { useZkLogin } from '../zklogin';
+import {
+  useCurrentAccount,
+  useSignAndExecuteTransaction,
+} from '@mysten/dapp-kit';
 import {
   buildPredictSelection,
   listFuturePredictOracles,
@@ -299,7 +302,10 @@ export function usePredictSelectionQuote() {
 }
 
 export function useProtocolWrites() {
-  const { address, isReady, signAndExecuteTransaction } = useZkLogin();
+  const currentAccount = useCurrentAccount();
+  const { mutateAsync: signAndExecuteTransaction } = useSignAndExecuteTransaction();
+  const address = currentAccount?.address ?? null;
+  const isReady = Boolean(currentAccount);
 
   const requireAddress = useCallback(() => {
     if (!address) {
