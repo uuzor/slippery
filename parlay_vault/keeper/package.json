@@ -6,9 +6,10 @@
   "main": "index.js",
   "scripts": {
     "build": "tsc",
-    "start": "ts-node settle_slip.ts",
-    "smoke": "ts-node smoke_flow.ts",
-    "place-open": "ts-node place_open_slip.ts",
+    "bot": "npm run build && node --env-file=.env.local ./dist/bot.js",
+    "start": "npm run build && node --env-file=.env.local ./dist/settle_slip.js",
+    "smoke": "npm run build && node --env-file=.env.local ./dist/smoke_flow.js",
+    "place-open": "npm run build && node --env-file=.env.local ./dist/place_open_slip.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],

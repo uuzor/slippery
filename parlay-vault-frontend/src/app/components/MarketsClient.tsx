@@ -6,8 +6,10 @@ import { useCurrentAccount } from '@mysten/dapp-kit';
 import {
   previewConstants,
   previewSlipFromQuotes,
+  MIN_EXECUTION_WINDOW_MS,
   useOwnedQuoteCoins,
   useOwnedSlipReceipts,
+  usePendingSlips,
   usePredictMarkets,
   usePredictSelectionQuote,
   useVaultState,
@@ -82,9 +84,10 @@ export default function MarketsClient() {
     usePredictMarkets('BTC', 8, 2, 0);
   const { data: quoteCoins, refresh: refreshCoins } = useOwnedQuoteCoins(address, 45_000);
   const { data: ownedReceipts, refresh: refreshReceipts } = useOwnedSlipReceipts(address, 45_000);
+  const { data: pendingSlips, refresh: refreshPendingSlips } = usePendingSlips(45_000);
   const { data: vaultState, refresh: refreshVaultState } = useVaultState(45_000);
   const { quoteFromMarket, isLoading: isQuoting, error: quoteError } = usePredictSelectionQuote();
-  const { placeSlip } = useProtocolWrites();
+  const { placeSlip, cancelPendingSlip } = useProtocolWrites();
 
   const [quantityInput, setQuantityInput] = useState('1000000');
   const [selectedLegs, setSelectedLegs] = useState<PredictQuote[]>([]);
@@ -92,11 +95,15 @@ export default function MarketsClient() {
   const [lastDigest, setLastDigest] = useState<string | null>(null);
   const [isPlacing, setIsPlacing] = useState(false);
   const [activeLegKey, setActiveLegKey] = useState<string | null>(null);
+  const [isCancellingSlipId, setIsCancellingSlipId] = useState<string | null>(null);
 
   const quantity = parseQuantityInput(quantityInput);
   const preview = previewSlipFromQuotes(selectedLegs);
   const totalQuoteBalance = (quoteCoins ?? []).reduce((sum, coin) => sum + coin.balance, 0n);
   const selectedLegKeys = new Set(selectedLegs.map((leg) => buildLegKey(leg)));
+  const pendingSlipIds = new Set(
+    (pendingSlips ?? []).map((slip) => slip.slipId),
+  );
   const canPlace =
     isReady &&
     selectedLegs.length >= Number(previewConstants.minLegs) &&
@@ -170,6 +177,11 @@ export default function MarketsClient() {
       setActionError('Insufficient dUSDC balance for the required stake.');
       return;
     }
+    const executionCutoff = BigInt(Date.now()) + MIN_EXECUTION_WINDOW_MS;
+    if (selectedLegs.some((leg) => leg.expiry <= executionCutoff)) {
+      setActionError('One or more legs are too close to expiry. Remove them and select a later market.');
+      return;
+    }
 
     setIsPlacing(true);
     try {
@@ -180,11 +192,26 @@ export default function MarketsClient() {
       });
       setLastDigest(result.digest);
       setSelectedLegs([]);
-      await Promise.all([refreshCoins(), refreshReceipts(), refreshVaultState()]);
+      await Promise.all([refreshCoins(), refreshReceipts(), refreshPendingSlips(), refreshVaultState()]);
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
     } finally {
       setIsPlacing(false);
+    }
+  }
+
+  async function handleCancelPendingSlip(slipId: string) {
+    setActionError(null);
+    setLastDigest(null);
+    setIsCancellingSlipId(slipId);
+    try {
+      const result = await cancelPendingSlip({ slipId });
+      setLastDigest(result.digest);
+      await Promise.all([refreshCoins(), refreshReceipts(), refreshPendingSlips(), refreshVaultState()]);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsCancellingSlipId(null);
     }
   }
 
@@ -472,7 +499,12 @@ export default function MarketsClient() {
                     <div key={receipt.receiptId} style={styles.receiptCard}>
                       <div style={styles.receiptTop}>
                         <span style={styles.receiptId}>{formatObjectId(receipt.receiptId)}</span>
-                        <span className="tag-mint">{receipt.legs.length} legs</span>
+                        <div style={styles.receiptTopRight}>
+                          <span className="tag-mint">{receipt.legs.length} legs</span>
+                          {pendingSlipIds.has(receipt.receiptId) ? (
+                            <span style={styles.pendingBadge}>Pending</span>
+                          ) : null}
+                        </div>
                       </div>
                       <div style={styles.receiptRow}>
                         <span style={styles.metaLabel}>Stake</span>
@@ -486,6 +518,16 @@ export default function MarketsClient() {
                         <span style={styles.metaLabel}>Bonus amount</span>
                         <span style={styles.metaValue}>{formatDusdc(receipt.bonusAmount)} DUSDC</span>
                       </div>
+                      {pendingSlipIds.has(receipt.receiptId) ? (
+                        <button
+                          className="btn-ghost"
+                          style={styles.cancelSlipButton}
+                          onClick={() => void handleCancelPendingSlip(receipt.receiptId)}
+                          disabled={isCancellingSlipId === receipt.receiptId}
+                        >
+                          {isCancellingSlipId === receipt.receiptId ? 'Cancelling...' : 'Cancel pending slip'}
+                        </button>
+                      ) : null}
                     </div>
                   ))}
                   {ownedReceipts && ownedReceipts.length === 0 ? (
@@ -887,10 +929,27 @@ const styles: Record<string, React.CSSProperties> = {
     alignItems: 'center',
     marginBottom: 12,
   },
+  receiptTopRight: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+  },
   receiptId: {
     fontFamily: 'monospace',
     fontSize: 13,
     color: '#d7d7d7',
+  },
+  pendingBadge: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    borderRadius: 999,
+    padding: '4px 8px',
+    background: 'rgba(255, 184, 0, 0.12)',
+    border: '1px solid rgba(255, 184, 0, 0.35)',
+    color: '#ffd166',
+    fontSize: 11,
+    letterSpacing: '0.08em',
+    textTransform: 'uppercase',
   },
   receiptRow: {
     display: 'flex',
@@ -898,5 +957,10 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 12,
     alignItems: 'center',
     marginTop: 8,
+  },
+  cancelSlipButton: {
+    marginTop: 12,
+    width: '100%',
+    justifyContent: 'center',
   },
 };

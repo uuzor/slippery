@@ -5,6 +5,7 @@ import { listPredictMarkets } from '../../lib/protocol/predict';
 export const dynamic = 'force-dynamic';
 
 const CACHE_TTL_MS = 15_000;
+const MIN_EXECUTION_WINDOW_MS = 5 * 60 * 1_000;
 
 type SerializedMarket = {
   marketId: string;
@@ -43,20 +44,26 @@ export async function GET(request: Request) {
   const cached = marketCache.get(cacheKey);
 
   if (cached && cached.expiresAt > now) {
-    return NextResponse.json(cached.data, {
+    return NextResponse.json(
+      cached.data.filter((market) => Number(market.expiry) > now + MIN_EXECUTION_WINDOW_MS),
+      {
       headers: {
         'cache-control': 'no-store',
       },
-    });
+      },
+    );
   }
 
   if (cached?.inflight) {
     const data = await cached.inflight;
-    return NextResponse.json(data, {
+    return NextResponse.json(
+      data.filter((market) => Number(market.expiry) > Date.now() + MIN_EXECUTION_WINDOW_MS),
+      {
       headers: {
         'cache-control': 'no-store',
       },
-    });
+      },
+    );
   }
 
   const inflight = (async () => {
@@ -108,12 +115,15 @@ export async function GET(request: Request) {
     });
   } catch (error) {
     if (cached?.data?.length) {
-      return NextResponse.json(cached.data, {
+      return NextResponse.json(
+        cached.data.filter((market) => Number(market.expiry) > Date.now() + MIN_EXECUTION_WINDOW_MS),
+        {
         headers: {
           'cache-control': 'no-store',
           'x-parlay-cache': 'stale',
         },
-      });
+        },
+      );
     }
     marketCache.delete(cacheKey);
     throw error;

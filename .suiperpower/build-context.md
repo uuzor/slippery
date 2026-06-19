@@ -131,3 +131,82 @@
   - once all legs are settled, keeper redeems the full slip, computes the winning-leg count, and calls the correct vault settlement path
 - residual note:
   - I did not rerun the new wait-based smoke flow in this turn because the next clean future BTC oracle expiry on testnet was still roughly 90 minutes out, so a real rerun would mostly idle waiting on Predict resolution
+
+### debug-move session, 2026-06-19
+
+- failing transaction: `4iKAaUyMfiPvN6WgQ6w4k43gMNiZs8czTJgKsUb2YbYM`
+- abort: `predict_manager::decrease_position`, code `1`, command `1`
+- affected slip: `0x7689f83f7320ff3915f620df8992ce63999c2ddce67320f08b7848f30d321d0f`
+- root cause: DeepBook permissionless executors had already redeemed all four manager positions before the keeper attempted redemption. The manager position for the first market key was therefore zero, but `bot.ts` submitted `redeem_permissionless` for quantity `1_000_000` again.
+- evidence:
+  - mint/finalize transaction `9nBAykhWCVfgv7P7LzDZ4CuwK18y2NWjnaqQXg8k6UhG`
+  - first three losing positions permissionlessly redeemed in `7LEV1jEkGLAruQzk14gMfqgPtCxjLJMYy7r55UijcNbY`
+  - final winning position permissionlessly redeemed for `1_000_000` DUSDC in `5fYhQgzRjanAUpcP3MdR4qsYQBF1PSpGnnbFnJAdMuPg`
+  - all four matching `PredictManager.positions` entries currently contain `0`
+- required fix: make keeper redemption idempotent by reading each manager position first, redeeming only remaining quantities, and using the resolved winning quantities / redemption events to withdraw the slip's exact proceeds before vault settlement.
+- architecture note: the shared PredictManager balance is pooled across slips, so `postBalance - preBalance` is not sufficient once a third party performs permissionless redemption. Per-slip payout accounting or isolated managers are needed for production-grade attribution.
+- fix implemented:
+  - continuous bot reads and allocates remaining manager position quantities before redeeming
+  - already-redeemed positions are skipped
+  - expected slip proceeds are derived from settled winning quantities
+  - pending execution is skipped once any leg has expired, instead of repeatedly submitting a PTB that aborts on the first non-live oracle
+- live verification:
+  - settlement transaction `BtYbbcbwtjLdKz11vkZ1FXFzowRjL4zyMix6gDqeb9Pa` succeeded
+  - `1_000_000` DUSDC was withdrawn and routed to LP liquidity through `settle_not_all_win`
+  - affected active/open slip was removed and its epoch became settled
+
+### frontend-design-guidelines session, 2026-06-19
+
+- route added: `/trade`
+- existing `/markets` route preserved
+- design source: `parlay-vault-frontend/DESIGN.md`
+- market UX changes:
+  - options-board presentation grouped by BTC expiry
+  - live spot, forward, forward delta, and expiry countdown
+  - outcome labels use trader language such as `BTC ABOVE` and `BTC BELOW`
+  - strike distance is shown as percentage from live spot
+  - selected outcomes display their live DUSDC quote
+- ticket UX changes:
+  - compact bet ticket with readable contract descriptions
+  - required stake, combined odds, LP bonus, and potential return
+  - unchanged placement and cancellation write hooks
+- receipt UX changes:
+  - batched read-only oracle settlement query
+  - pending, live, resolving, won, and lost status presentation
+  - per-leg outcome state and expiry display
+- verification:
+  - `npm run build` succeeded
+  - production routes include both `/markets` and `/trade`
+  - pending receipt matching now uses canonical slip ids without a redundant owner-string comparison
+  - expired pending receipts are labeled `Expired - cancel` and retain the cancellation action
+  - market discovery and submission enforce a five-minute keeper execution window
+
+### frontend-design-guidelines session, 2026-06-19 LP page
+
+- route added: `/liquidity`
+- contract flow verified:
+  - deposits queue for `current_epoch + 1`
+  - queued LPShare objects can be cancelled before activation
+  - active positions remain locked through their activation epoch
+  - withdrawal and rollover require `activation_epoch < current_epoch`
+  - withdrawal and rollover also require zero unsettled slips for the activation epoch
+- read integration added:
+  - current Sui chain epoch
+  - current vault epoch slip count
+  - per-position activation-epoch slip count
+  - per-position estimated redeemable value at current share price
+- write integration used:
+  - queue deposit
+  - cancel queued deposit
+  - withdraw
+  - roll over
+  - advance epoch
+- UI behavior:
+  - trader-desk layout aligned with `/trade`
+  - explicit queued, locked, settling, and withdraw-ready states
+  - action buttons only enable when Move preconditions are satisfied
+  - deposit panel explains next-epoch activation and earliest withdrawal
+  - rollover flag is described accurately as metadata requiring a later `roll_over` transaction
+- verification:
+  - production build succeeded with `/liquidity`, `/trade`, and `/markets`
+  - live testnet lookup for epoch `1134` returned `2` unsettled slips

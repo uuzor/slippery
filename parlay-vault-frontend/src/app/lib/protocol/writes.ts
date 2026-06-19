@@ -163,6 +163,26 @@ export function buildAdvanceEpochTransaction(input: {
   return tx;
 }
 
+export function buildCancelPendingSlipTransaction(input: {
+  owner: string;
+  slipId: string;
+}) {
+  const tx = new Transaction();
+  tx.setSender(input.owner);
+
+  const [coin] = tx.moveCall({
+    target: protocolTargets.cancelPendingSlip,
+    typeArguments: [DEEPBOOK_QUOTE_TYPE],
+    arguments: [
+      tx.object(VAULT_ID),
+      tx.pure.id(normalizeId(input.slipId)),
+    ],
+  });
+
+  tx.transferObjects([coin], tx.pure.address(input.owner));
+  return tx;
+}
+
 export function buildPlaceSlipTransaction(input: {
   owner: string;
   coinObjectIds: string[];

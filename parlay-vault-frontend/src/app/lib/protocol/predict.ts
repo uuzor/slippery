@@ -18,6 +18,7 @@ import type {
 import { normalizeId, toBigInt } from './utils';
 
 export const DEFAULT_PREDICT_QUANTITY = 1_000_000n;
+export const MIN_EXECUTION_WINDOW_MS = 5n * 60n * 1_000n;
 
 function decodeU64(value: [number[], string]): bigint {
   return BigInt(value[0].reduceRight((acc, byte) => (acc << 8n) + BigInt(byte), 0n));
@@ -141,7 +142,11 @@ export async function listFuturePredictOracles(
 
       const expiry = BigInt(String(fields.expiry));
       const asset = String(fields.underlying_asset);
-      if (fields.active !== true || asset !== underlyingAsset || expiry <= nowMs) {
+      if (
+        fields.active !== true
+        || asset !== underlyingAsset
+        || expiry <= nowMs + MIN_EXECUTION_WINDOW_MS
+      ) {
         continue;
       }
 

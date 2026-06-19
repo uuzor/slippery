@@ -18,6 +18,7 @@ import {
   getOwnedLpShares,
   getOwnedQuoteCoins,
   getOwnedSlipReceipts,
+  getOracleSettlements,
   getPendingSlips,
   getProtocolSnapshot,
   getVaultState,
@@ -25,6 +26,7 @@ import {
 import type {
   IndexedSlip,
   LPPosition,
+  OracleSettlement,
   PredictMarket,
   PredictSelection,
   PredictOracleCandidate,
@@ -35,6 +37,7 @@ import type {
 import { toBigInt } from './utils';
 import {
   buildAdvanceEpochTransaction,
+  buildCancelPendingSlipTransaction,
   buildCancelQueuedDepositTransaction,
   buildDepositTransaction,
   buildPlaceSlipTransaction,
@@ -374,6 +377,15 @@ export function useProtocolWrites() {
     [requireAddress, signAndExecuteTransaction],
   );
 
+  const cancelPendingSlip = useCallback(
+    async (input: Omit<Parameters<typeof buildCancelPendingSlipTransaction>[0], 'owner'>) => {
+      const owner = requireAddress();
+      const transaction = buildCancelPendingSlipTransaction({ ...input, owner });
+      return signAndExecuteTransaction({ transaction });
+    },
+    [requireAddress, signAndExecuteTransaction],
+  );
+
   return useMemo(
     () => ({
       address,
@@ -384,6 +396,7 @@ export function useProtocolWrites() {
       cancelQueuedDeposit,
       rollOver,
       advanceEpoch,
+      cancelPendingSlip,
       placeSlip,
     }),
     [
@@ -395,7 +408,18 @@ export function useProtocolWrites() {
       cancelQueuedDeposit,
       rollOver,
       advanceEpoch,
+      cancelPendingSlip,
       placeSlip,
     ],
+  );
+}
+
+export function useOracleSettlements(oracleIds: string[], pollMs = 30_000) {
+  const normalizedKey = [...new Set(oracleIds)].sort().join(',');
+  return useQuery<OracleSettlement[]>(
+    normalizedKey.length > 0,
+    () => getOracleSettlements(normalizedKey.split(',')),
+    [normalizedKey, pollMs],
+    pollMs,
   );
 }

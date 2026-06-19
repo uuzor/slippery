@@ -307,6 +307,63 @@ We updated keeper behavior so it now:
 
 A smoke test can be technically successful and still economically wrong. For protocol work, flow correctness matters as much as transaction success.
 
+## 12. Permissionless redemption made keeper redemption non-idempotent
+
+### Problem
+
+DeepBook Predict allows a third-party executor to call `redeem_permissionless` after an oracle settles. This happened to a live four-leg slip:
+
+- the keeper minted all four positions successfully
+- DeepBook executors redeemed the first three losing positions
+- a DeepBook executor later redeemed the winning position and credited `1 DUSDC` to the protocol PredictManager
+- our keeper then attempted to redeem every leg again
+- `predict_manager::decrease_position` aborted because the first position quantity was already zero
+
+The relevant transactions were:
+
+- mint and finalize: `9nBAykhWCVfgv7P7LzDZ4CuwK18y2NWjnaqQXg8k6UhG`
+- first three permissionless redemptions: `7LEV1jEkGLAruQzk14gMfqgPtCxjLJMYy7r55UijcNbY`
+- final winning-leg redemption: `5fYhQgzRjanAUpcP3MdR4qsYQBF1PSpGnnbFnJAdMuPg`
+- duplicate keeper redemption failure: `4iKAaUyMfiPvN6WgQ6w4k43gMNiZs8czTJgKsUb2YbYM`
+
+### Fix
+
+The continuous keeper now:
+
+- reads the PredictManager position table before building a redemption PTB
+- allocates available position quantity across legs sharing the same market key
+- redeems only quantities that remain non-zero
+- treats already-zero positions as already redeemed rather than as an error
+- computes the slip proceeds from settled winning-leg quantities
+- verifies the PredictManager contains enough quote balance
+- withdraws the exact slip proceeds inside the vault settlement PTB
+- refuses to execute a pending slip after its latest leg expiry, avoiding repeated `assert_live_oracle` failures while the bettor cancels it
+
+### Settlement routing
+
+- If every leg wins, the Predict proceeds are withdrawn and sent to the bettor together with the LP-funded bonus.
+- If any leg loses, the Predict proceeds from the winning legs are withdrawn and joined into `lp_balance`.
+- Settled slip proceeds are not intentionally left in the PredictManager.
+
+### What we learned
+
+Oracle settlement and position redemption are separate state transitions. A keeper must assume another actor can redeem first and make its own work idempotent.
+
+The PredictManager is also pooled across slips. Balance deltas are therefore not reliable payout attribution when third parties can redeem asynchronously. The keeper uses binary winning quantity as the expected settled payout, but production accounting should eventually record each slip's mint cost, unused quote balance, and redemption attribution explicitly.
+
+### Live verification
+
+The updated keeper recovered and settled the affected four-leg slip in transaction:
+
+- settlement: `BtYbbcbwtjLdKz11vkZ1FXFzowRjL4zyMix6gDqeb9Pa`
+
+The slip had one winning leg, so the keeper withdrew `1 DUSDC` from the PredictManager and called `settle_not_all_win`. After settlement:
+
+- `OpenSlips.size = 0`
+- `active_slips.size = 0`
+- `epoch_settled = true`
+- LP balance increased from `302.421324 DUSDC` to `303.421324 DUSDC`
+
 ## Final On-Chain State Reached
 
 Latest testnet package:
@@ -334,10 +391,10 @@ Later, keeper logic was tightened again so the intended production flow now wait
 These are the remaining practical items:
 
 - run one real LP withdrawal on testnet after epoch rollover
-- run one fully waited Predict-settlement flow end to end
+- verify the updated idempotent keeper settles the currently redeemed open slip
 - decide whether to add an admin cleanup path for bootstrap-seeded LP shares
 - decide whether `SlipReceipt` should be explicitly consumed/burned at final settlement
-- clean up the compiled `dist` ESM path if we want a plain compiled keeper runtime instead of the `ts-node` loader path
+- add per-slip accounting for unused PredictManager quote balance after mint
 
 ## Main Lessons
 

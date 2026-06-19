@@ -14,11 +14,19 @@ import type {
   CoinObjectRef,
   IndexedSlip,
   LPPosition,
+  OracleSettlement,
   SlipPhase,
   SlipReceipt,
   VaultState,
 } from './types';
-import { chunk, decodeMarketLegFromFields, ensureMoveFields, normalizeId, toBigInt } from './utils';
+import {
+  chunk,
+  decodeMarketLegFromFields,
+  ensureMoveFields,
+  extractTableId,
+  normalizeId,
+  toBigInt,
+} from './utils';
 
 async function multiGetObjectsChunked(
   client: SuiJsonRpcClient,
@@ -91,13 +99,15 @@ function parseVaultFromObject(object: SuiObjectResponse): VaultState {
     sharePrice,
     bonusReserve,
     availableBonusCapacity,
+    chainEpoch: 0n,
+    currentEpochSlipCount: 0n,
     tableRefs: {
-      pendingDeposits: normalizeId((fields.pending_deposits as { id: string }).id),
-      pendingShareIds: normalizeId((fields.pending_share_ids as { id: string }).id),
-      lpPositions: normalizeId((fields.lp_positions as { id: string }).id),
-      pendingSlips: normalizeId((fields.pending_slips as { id: string }).id),
-      activeSlips: normalizeId((fields.active_slips as { id: string }).id),
-      epochSlipCounts: normalizeId((fields.epoch_slip_counts as { id: string }).id),
+      pendingDeposits: extractTableId(fields.pending_deposits, 'pending_deposits'),
+      pendingShareIds: extractTableId(fields.pending_share_ids, 'pending_share_ids'),
+      lpPositions: extractTableId(fields.lp_positions, 'lp_positions'),
+      pendingSlips: extractTableId(fields.pending_slips, 'pending_slips'),
+      activeSlips: extractTableId(fields.active_slips, 'active_slips'),
+      epochSlipCounts: extractTableId(fields.epoch_slip_counts, 'epoch_slip_counts'),
     },
   };
 }
@@ -142,7 +152,32 @@ function parseLPPosition(object: SuiObjectResponse): LPPosition {
     activationEpoch: toBigInt(value.activation_epoch as string),
     autoRoll: Boolean(value.auto_roll),
     isActive: Boolean(value.is_active),
+    unsettledSlipCount: 0n,
+    estimatedValue: 0n,
   };
+}
+
+async function getEpochSlipCount(
+  client: SuiJsonRpcClient,
+  tableId: string,
+  epoch: bigint,
+): Promise<bigint> {
+  try {
+    const response = await client.getDynamicFieldObject({
+      parentId: tableId,
+      name: {
+        type: 'u64',
+        value: epoch.toString(),
+      },
+    });
+    if (!response.data?.content) {
+      return 0n;
+    }
+    const fields = ensureMoveFields(response.data.content);
+    return toBigInt(fields.value as string);
+  } catch {
+    return 0n;
+  }
 }
 
 function parseIndexedSlip(
@@ -192,11 +227,24 @@ async function readSlipTable(
 export async function getVaultState(
   client: SuiJsonRpcClient = protocolClient,
 ): Promise<VaultState> {
-  const object = await client.getObject({
-    id: VAULT_ID,
-    options: { showContent: true, showType: true },
-  });
-  return parseVaultFromObject(object);
+  const [object, systemState] = await Promise.all([
+    client.getObject({
+      id: VAULT_ID,
+      options: { showContent: true, showType: true },
+    }),
+    client.getLatestSuiSystemState(),
+  ]);
+  const vault = parseVaultFromObject(object);
+  const currentEpochSlipCount = await getEpochSlipCount(
+    client,
+    vault.tableRefs.epochSlipCounts,
+    vault.currentEpoch,
+  );
+  return {
+    ...vault,
+    chainEpoch: toBigInt(systemState.epoch),
+    currentEpochSlipCount,
+  };
 }
 
 export async function getOwnedQuoteCoins(
@@ -245,7 +293,20 @@ export async function getOwnedLpShares(
       })),
   );
 
-  return positions.map(parseLPPosition);
+  const parsed = positions.map(parseLPPosition);
+  const slipCounts = await Promise.all(
+    parsed.map((position) =>
+      getEpochSlipCount(client, vault.tableRefs.epochSlipCounts, position.activationEpoch),
+    ),
+  );
+
+  return parsed.map((position, index) => ({
+    ...position,
+    unsettledSlipCount: slipCounts[index],
+    estimatedValue: position.isActive
+      ? (position.shares * vault.sharePrice) / 1_000_000n
+      : position.principal,
+  }));
 }
 
 export async function getOwnedSlipReceipts(
@@ -261,6 +322,40 @@ export async function getOwnedSlipReceipts(
   return owned.data
     .filter((item) => Boolean(item.data?.content))
     .map(parseReceipt);
+}
+
+export async function getOracleSettlements(
+  oracleIds: string[],
+  client: SuiJsonRpcClient = protocolClient,
+): Promise<OracleSettlement[]> {
+  const uniqueIds = [...new Set(oracleIds.map(normalizeId))];
+  if (uniqueIds.length === 0) {
+    return [];
+  }
+
+  const objects = await multiGetObjectsChunked(client, uniqueIds);
+  return objects.map((object, index) => {
+    const objectData = object.data;
+    if (!objectData?.content) {
+      return {
+        oracleId: uniqueIds[index],
+        settlementPrice: null,
+        active: false,
+        expiry: 0n,
+      };
+    }
+
+    const fields = ensureMoveFields(objectData.content);
+    const settlement = fields.settlement_price;
+    return {
+      oracleId: normalizeId(String(objectData.objectId)),
+      settlementPrice: settlement === null || settlement === undefined
+        ? null
+        : toBigInt(settlement as string),
+      active: Boolean(fields.active),
+      expiry: toBigInt(fields.expiry as string),
+    };
+  });
 }
 
 export async function getPendingSlips(
@@ -291,7 +386,7 @@ export async function getOpenSlips(
   }
 
   const fields = ensureMoveFields(objectData.content);
-  const slipsTableId = normalizeId((fields.slips as { id: string }).id);
+  const slipsTableId = extractTableId(fields.slips, 'open_slips.slips');
   return readSlipTable(client, slipsTableId, 'open');
 }
 
