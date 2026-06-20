@@ -170,6 +170,20 @@ keeper/.state/bot-state.json
 
 The cursors reduce repeated event processing after a restart. The bot also resynchronizes pending and active slips directly from shared objects, so event cursors are not its only source of truth.
 
+The bot also maintains the vault epoch:
+
+- It compares `Vault.current_epoch` with the current Sui system epoch.
+- It calls `advance_epoch` only after the vault's current epoch has no unsettled slips.
+- It advances sequentially when the vault is multiple epochs behind, which activates queued LP deposits in the correct epoch.
+- LP withdrawals and rollovers remain user-signed transactions because they consume the user's owned `LPShare`. The keeper unlocks those actions by advancing the vault epoch; it does not take custody of LP shares.
+
+Optional epoch-loop settings:
+
+```env
+KEEPER_EPOCH_POLL_INTERVAL_MS=15000
+KEEPER_MAX_EPOCH_ADVANCES_PER_TICK=10
+```
+
 ## Operational Notes
 
 - Only one active keeper should normally use the same signer and `AdminCap`.

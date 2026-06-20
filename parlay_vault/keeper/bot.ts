@@ -68,6 +68,8 @@ const OPEN_SLIPS_ID = normalizeSuiObjectId(mustEnv('OPEN_SLIPS_ID'));
 const ADMIN_CAP_ID = normalizeSuiObjectId(mustEnv('ADMIN_CAP_ID'));
 const RESYNC_INTERVAL_MS = Number(process.env.KEEPER_RESYNC_INTERVAL_MS ?? '30000');
 const POLL_INTERVAL_MS = Number(process.env.KEEPER_POLL_INTERVAL_MS ?? '5000');
+const EPOCH_POLL_INTERVAL_MS = Number(process.env.KEEPER_EPOCH_POLL_INTERVAL_MS ?? '15000');
+const MAX_EPOCH_ADVANCES_PER_TICK = Number(process.env.KEEPER_MAX_EPOCH_ADVANCES_PER_TICK ?? '10');
 const SETTLEMENT_GRACE_MS = BigInt(process.env.KEEPER_SETTLEMENT_GRACE_MS ?? '30000');
 const SETTLEMENT_RETRY_MS = BigInt(process.env.KEEPER_SETTLEMENT_RETRY_MS ?? '60000');
 const ENABLE_ORACLE_EVENT_POLLING = process.env.KEEPER_ENABLE_ORACLE_EVENT_POLLING === 'true';
@@ -90,6 +92,7 @@ const settlingSlips = new Set<string>();
 const expiredPendingSlips = new Set<string>();
 
 let predictManagerId: string;
+let advancingEpoch = false;
 let keeperState: KeeperState = {
   pendingCursor: null,
   oracleCursor: null,
@@ -713,6 +716,54 @@ async function resyncOnChainState(): Promise<void> {
   await bootstrapActiveSlips();
 }
 
+async function maintainVaultEpoch(): Promise<void> {
+  if (advancingEpoch) {
+    return;
+  }
+
+  advancingEpoch = true;
+  try {
+    for (let advances = 0; advances < MAX_EPOCH_ADVANCES_PER_TICK; advances += 1) {
+      const [vaultFields, systemState] = await Promise.all([
+        getObjectFields(VAULT_ID),
+        client.getLatestSuiSystemState(),
+      ]);
+      const vaultEpoch = toBigInt(vaultFields.current_epoch);
+      const chainEpoch = BigInt(systemState.epoch);
+      const epochSettled = Boolean(vaultFields.epoch_settled);
+
+      if (vaultEpoch >= chainEpoch) {
+        return;
+      }
+      if (!epochSettled) {
+        log(`vault epoch ${vaultEpoch} is waiting for active slips to settle before advancing`);
+        return;
+      }
+
+      const tx = new Transaction();
+      tx.setGasBudget(100_000_000);
+      tx.moveCall({
+        target: `${VAULT_PKG}::parlay_vault::advance_epoch`,
+        typeArguments: [QUOTE_TYPE],
+        arguments: [tx.object(VAULT_ID)],
+      });
+
+      const result = await client.signAndExecuteTransaction({
+        signer: keypair,
+        transaction: tx,
+        options: { showEffects: true, showEvents: true },
+      });
+      if (result.effects?.status.status !== 'success') {
+        throw new Error(result.effects?.status.error ?? `advance_epoch failed from ${vaultEpoch}`);
+      }
+
+      log(`advanced vault epoch ${vaultEpoch} -> ${vaultEpoch + 1n}: ${result.digest}`);
+    }
+  } finally {
+    advancingEpoch = false;
+  }
+}
+
 async function pollPendingLoop(): Promise<never> {
   let backoffMs = POLL_INTERVAL_MS;
   for (;;) {
@@ -814,6 +865,19 @@ async function settlementSchedulerLoop(): Promise<never> {
   }
 }
 
+async function epochMaintenanceLoop(): Promise<never> {
+  for (;;) {
+    try {
+      await maintainVaultEpoch();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`epoch maintenance failed: ${message}`);
+    }
+
+    await sleep(EPOCH_POLL_INTERVAL_MS);
+  }
+}
+
 async function resyncLoop(): Promise<never> {
   for (;;) {
     try {
@@ -848,6 +912,7 @@ async function main(): Promise<void> {
     void pollOracleLoop();
   }
   void settlementSchedulerLoop();
+  void epochMaintenanceLoop();
   await resyncLoop();
 }
 

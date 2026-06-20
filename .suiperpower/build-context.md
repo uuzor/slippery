@@ -210,3 +210,16 @@
 - verification:
   - production build succeeded with `/liquidity`, `/trade`, and `/markets`
   - live testnet lookup for epoch `1134` returned `2` unsettled slips
+
+### build-with-move session, 2026-06-20 keeper epoch maintenance
+
+- keeper module updated: `keeper/bot.ts`
+- loop added: periodic vault epoch maintenance
+- liquidity behavior:
+  - queued deposits are activated by calling `advance_epoch` after the Sui chain epoch moves forward
+  - the keeper waits while the vault's current epoch still has unsettled slips
+  - a lagging vault is advanced sequentially, preserving per-epoch deposit activation
+  - withdrawals and rollovers remain owner-authorized actions using the owned `LPShare`; the keeper only unlocks them by maintaining vault epochs
+- configuration added:
+  - `KEEPER_EPOCH_POLL_INTERVAL_MS`, default `15000`
+  - `KEEPER_MAX_EPOCH_ADVANCES_PER_TICK`, default `10`
