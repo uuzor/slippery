@@ -1,25 +1,23 @@
 FROM node:22-alpine AS builder
 
-WORKDIR /app/keeper
+WORKDIR /app
 
-COPY parlay_vault/keeper/package.json ./
-COPY parlay_vault/keeper/tsconfig.json ./
-
+COPY package*.json ./
 RUN npm ci
 
-COPY parlay_vault/keeper/*.ts ./
-RUN npm run build
+COPY . .
+RUN npx tsc
 
 FROM node:22-alpine AS runtime
 
-WORKDIR /app/keeper
+WORKDIR /app
 
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S nextjs -u 1001
 
-COPY --from=builder --chown=nextjs:nodejs /app/keeper/node_modules ./node_modules
-COPY --from=builder --chown=nextjs:nodejs /app/keeper/dist ./dist
-COPY --from=builder --chown=nextjs:nodejs /app/keeper/package.json ./
+COPY --from=builder --chown=nextjs:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=nextjs:nodejs /app/dist ./dist
+COPY --from=builder --chown=nextjs:nodejs /app/package.json ./
 
 USER nextjs
 
@@ -31,6 +29,6 @@ ENV KEEPER_SETTLEMENT_GRACE_MS=30000
 ENV KEEPER_SETTLEMENT_RETRY_MS=60000
 ENV KEEPER_ENABLE_ORACLE_EVENT_POLLING=false
 
-VOLUME ["/app/keeper/.state"]
+VOLUME ["/app/.state"]
 
 CMD ["node", "dist/bot.js"]
