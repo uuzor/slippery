@@ -87,6 +87,7 @@ export const protocolTargets = {
   cancelQueuedDeposit: `${PROTOCOL_PACKAGE_ID}::parlay_vault::cancel_queued_deposit`,
   rollOver: `${PROTOCOL_PACKAGE_ID}::parlay_vault::roll_over`,
   advanceEpoch: `${PROTOCOL_PACKAGE_ID}::parlay_vault::advance_epoch`,
+  cancelPendingSlip: `${PROTOCOL_PACKAGE_ID}::parlay_vault::cancel_pending_slip`,
   placeSlipBcs: `${PROTOCOL_PACKAGE_ID}::slip_executor::place_slip_bcs`,
   deepbookPredictPackage: `${PROTOCOL_PACKAGE_ID}::slip_executor::deepbook_predict_package`,
 } as const;

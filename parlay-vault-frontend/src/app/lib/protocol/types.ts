@@ -37,6 +37,8 @@ export interface VaultState {
   sharePrice: bigint;
   bonusReserve: bigint;
   availableBonusCapacity: bigint;
+  chainEpoch: bigint;
+  currentEpochSlipCount: bigint;
   tableRefs: VaultTableRefs;
 }
 
@@ -47,6 +49,8 @@ export interface LPPosition {
   activationEpoch: bigint;
   autoRoll: boolean;
   isActive: boolean;
+  unsettledSlipCount: bigint;
+  estimatedValue: bigint;
 }
 
 export interface SlipReceipt {
@@ -135,4 +139,11 @@ export interface SlipPreview {
 export interface CoinObjectRef {
   coinObjectId: string;
   balance: bigint;
+}
+
+export interface OracleSettlement {
+  oracleId: string;
+  settlementPrice: bigint | null;
+  active: boolean;
+  expiry: bigint;
 }

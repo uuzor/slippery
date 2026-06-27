@@ -18,6 +18,29 @@ export function bytesToObjectId(bytes: number[] | Uint8Array): string {
   return normalizeId(`0x${hex}`);
 }
 
+export function extractObjectId(value: unknown, label = 'object'): string {
+  if (typeof value === 'string') {
+    return normalizeId(value);
+  }
+
+  if (value && typeof value === 'object' && 'id' in value) {
+    return normalizeId(String((value as { id: unknown }).id));
+  }
+
+  throw new Error(`Unable to extract object id for ${label}`);
+}
+
+export function extractTableId(value: unknown, label = 'table'): string {
+  if (value && typeof value === 'object' && 'fields' in value) {
+    const fields = (value as { fields?: { id?: unknown } }).fields;
+    if (fields?.id !== undefined) {
+      return extractObjectId(fields.id, label);
+    }
+  }
+
+  return extractObjectId(value, label);
+}
+
 export function decodeMarketLegFromFields(fields: Record<string, unknown>): MarketLeg {
   return {
     oracleId: bytesToObjectId(fields.oracle_id as number[]),

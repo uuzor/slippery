@@ -3,6 +3,7 @@ import { Ed25519Keypair as Ed25519Signer } from '@mysten/sui/keypairs/ed25519';
 import type { SuiJsonRpcClient } from '@mysten/sui/jsonRpc';
 import { Transaction } from '@mysten/sui/transactions';
 import { normalizeSuiObjectId } from '@mysten/sui/utils';
+import { decodeSuiPrivateKey } from '@mysten/sui/cryptography';
 
 import {
   addPredictManagerDeposit,
@@ -12,7 +13,6 @@ import {
   createPredictClient,
   defaultPredictConfig,
   ensurePredictManager,
-  serializeSlipLegs,
   type PredictConfig,
   type PredictLeg,
 } from './predict_ptb.js';
@@ -97,6 +97,10 @@ function parsePrivateKey(): Uint8Array {
     throw new Error('KEEPER_PRIVATE_KEY is not set');
   }
 
+  if (raw.startsWith('suiprivkey')) {
+    return decodeSuiPrivateKey(raw).secretKey;
+  }
+
   return Buffer.from(normalizeHex(raw), 'hex');
 }
 
@@ -170,6 +174,39 @@ function executionContext(): { keypair: Ed25519Keypair; manager: string } {
 
 function legWins(leg: PredictLeg, settlementPrice: bigint): boolean {
   return leg.isUp ? settlementPrice > BigInt(leg.strike) : settlementPrice <= BigInt(leg.strike);
+}
+
+async function loadTrackedSlipFromReceipt(slipId: string): Promise<TrackedSlip> {
+  const object = await client.getObject({
+    id: normalizeSuiObjectId(slipId),
+    options: { showContent: true },
+  });
+  const content = object.data?.content as { fields?: Record<string, unknown> } | undefined;
+  const fields = content?.fields;
+  if (!fields) {
+    throw new Error(`SlipReceipt content unavailable for ${slipId}`);
+  }
+
+  const rawLegs = fields.legs as Array<{ fields?: Record<string, unknown> }>;
+  const legs: PredictLeg[] = rawLegs.map((leg) => {
+    const legFields = leg.fields ?? {};
+    return {
+      oracleId: normalizeSuiObjectId(`0x${Buffer.from(legFields.oracle_id as number[]).toString('hex')}`),
+      expiry: BigInt(String(legFields.expiry)),
+      strike: BigInt(String(legFields.strike)),
+      isUp: Boolean(legFields.is_up),
+      quantity: BigInt(String(legFields.quantity)),
+      askPrice: BigInt(String(legFields.ask_price)),
+    };
+  });
+
+  return {
+    slipId: normalizeSuiObjectId(slipId),
+    owner: String(fields.owner),
+    stake: BigInt(String(fields.stake)),
+    bonusAmount: BigInt(String(fields.bonus_amount)),
+    legs,
+  };
 }
 
 async function readOracleSettlement(oracleId: string): Promise<OracleSettlement> {
@@ -306,6 +343,7 @@ export async function executePendingSlip(slip: TrackedSlip): Promise<string> {
 
   const releasedStake = tx.moveCall({
     target: `${configuredObject(VAULT_PKG, 'VAULT_PKG')}::parlay_vault::release_pending_stake`,
+    typeArguments: [DEEPBOOK_QUOTE_TYPE],
     arguments: [
       tx.object(configuredObject(VAULT_ID, 'VAULT_ID')),
       tx.pure.id(slip.slipId),
@@ -318,6 +356,7 @@ export async function executePendingSlip(slip: TrackedSlip): Promise<string> {
 
   tx.moveCall({
     target: `${configuredObject(VAULT_PKG, 'VAULT_PKG')}::parlay_vault::finalize_slip`,
+    typeArguments: [DEEPBOOK_QUOTE_TYPE],
     arguments: [
       tx.object(configuredObject(VAULT_ID, 'VAULT_ID')),
       tx.pure.id(slip.slipId),
@@ -327,6 +366,7 @@ export async function executePendingSlip(slip: TrackedSlip): Promise<string> {
 
   tx.moveCall({
     target: `${configuredObject(VAULT_PKG, 'VAULT_PKG')}::slip_executor::register_active_slip`,
+    typeArguments: [DEEPBOOK_QUOTE_TYPE],
     arguments: [
       tx.object(configuredObject(VAULT_ID, 'VAULT_ID')),
       tx.object(configuredObject(OPEN_SLIPS_ID, 'OPEN_SLIPS_ID')),
@@ -420,6 +460,7 @@ export async function settleSlip(
     if (vaultOutcome === 'won') {
       tx.moveCall({
         target: `${configuredObject(VAULT_PKG, 'VAULT_PKG')}::slip_executor::settle_all_win`,
+        typeArguments: [DEEPBOOK_QUOTE_TYPE],
         arguments: [
           tx.object(configuredObject(VAULT_ID, 'VAULT_ID')),
           tx.object(configuredObject(OPEN_SLIPS_ID, 'OPEN_SLIPS_ID')),
@@ -431,6 +472,7 @@ export async function settleSlip(
     } else {
       tx.moveCall({
         target: `${configuredObject(VAULT_PKG, 'VAULT_PKG')}::slip_executor::settle_not_all_win`,
+        typeArguments: [DEEPBOOK_QUOTE_TYPE],
         arguments: [
           tx.object(configuredObject(VAULT_ID, 'VAULT_ID')),
           tx.object(configuredObject(OPEN_SLIPS_ID, 'OPEN_SLIPS_ID')),
@@ -522,9 +564,13 @@ async function subscribeToPendingSlips(rpc: SuiJsonRpcClient): Promise<() => voi
 
       const slipEvent = event.parsedJson as PendingSlipEvent;
       console.log(`Pending slip ${slipEvent.slip_id} from ${slipEvent.owner} for ${slipEvent.stake}`);
-      console.log(
-        'Predict PTB path is live; the next keeper step is to load the canonical pending-slip quote from chain and execute it into Predict',
-      );
+      try {
+        const slip = await loadTrackedSlipFromReceipt(slipEvent.slip_id);
+        await executePendingSlip(slip);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(`Failed to execute pending slip ${slipEvent.slip_id}: ${message}`);
+      }
     },
   );
 }

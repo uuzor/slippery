@@ -1,10 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { useZkLogin } from '../lib/zklogin';
+import {
+  useConnectWallet,
+  useCurrentAccount,
+  useDisconnectWallet,
+  useWallets,
+} from '@mysten/dapp-kit';
+import { isEnokiWallet } from '@mysten/enoki';
 
 const NAV_ITEMS = [
+  { label: 'Trade', href: '/trade' },
+  { label: 'Liquidity', href: '/liquidity' },
   { label: 'Markets', href: '/markets' },
   { label: 'How It Works', href: '/#how-it-works' },
   { label: 'Earn', href: '/#earn' },
@@ -13,11 +21,73 @@ const NAV_ITEMS = [
 
 export default function Navbar() {
   const [menuOpen, setMenuOpen] = useState(false);
-  const { address, isLoading, loginWithGoogle, logout, resetLogin } = useZkLogin();
+  const [copied, setCopied] = useState(false);
 
-  const shortAddress = address
-    ? `${address.slice(0, 6)}...${address.slice(-4)}`
-    : null;
+  const currentAccount = useCurrentAccount();
+  const { mutate: disconnect, isPending: isDisconnecting } = useDisconnectWallet();
+  const { mutate: connect, isPending: isConnecting } = useConnectWallet();
+  const enokiWallets = useWallets().filter(isEnokiWallet);
+  const googleWallet = enokiWallets.find((w) => w.provider === 'google');
+
+  useEffect(() => {
+    console.log('[auth:state] wallets=%d, google=%s, account=%s', enokiWallets.length, googleWallet ? 'yes' : 'no', currentAccount?.address ?? 'null');
+  }, [enokiWallets.length, googleWallet, currentAccount?.address]);
+
+  const shortAddress = useMemo(() => {
+    if (!currentAccount?.address) return null;
+    return `${currentAccount.address.slice(0, 6)}...${currentAccount.address.slice(-4)}`;
+  }, [currentAccount?.address]);
+
+  async function handleCopyAddress() {
+    if (!currentAccount?.address) return;
+    try {
+      await navigator.clipboard.writeText(currentAccount.address);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (err) {
+      // Fallback for browsers that block the async clipboard API (e.g. insecure
+      // contexts where the page isn't https / localhost). Try the legacy
+      // execCommand path so the action still does *something* useful.
+      const ta = document.createElement('textarea');
+      ta.value = currentAccount.address;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1500);
+      } catch (e2) {
+        console.error('[auth:copy] Failed to copy address', e2);
+      } finally {
+        document.body.removeChild(ta);
+      }
+    }
+  }
+
+  function handleSignIn() {
+    if (!googleWallet) {
+      console.warn('[auth:signin] no googleWallet — Enoki wallets not yet registered');
+      return;
+    }
+    console.log('[auth:signin] calling connect, wallet name=%s, accounts=%d', googleWallet.name, googleWallet.accounts.length);
+    connect(
+      { wallet: googleWallet },
+      {
+        onSuccess: (data) => console.log('[auth:signin] connect onSuccess, accounts=%o', data?.accounts?.map((a: { address: string }) => a.address)),
+        onError: (err) => console.error('[auth:signin] connect onError', err),
+      },
+    );
+  }
+
+  const isLoading = isConnecting || isDisconnecting;
+  const signInDisabled = isLoading || !googleWallet;
+  const signInLabel = isConnecting
+    ? 'Opening Google...'
+    : !googleWallet
+      ? 'Loading...'
+      : 'Sign in with Google';
 
   return (
     <nav style={styles.nav}>
@@ -46,33 +116,50 @@ export default function Navbar() {
             <span style={styles.suiLabel}>Sui Network</span>
           </div>
 
-          {address ? (
+          {currentAccount?.address ? (
             <div style={styles.loggedIn}>
-              <span style={styles.addressPill}>{shortAddress}</span>
-              <span className="hidden">{address}</span>
               <button
-                className="btn-connect"
-                onClick={resetLogin}
-                title="Clear cached proof and session; sign in again to mint a fresh zkLogin proof."
-                style={{ background: '#222', color: '#9b9b9b' }}
+                type="button"
+                onClick={handleCopyAddress}
+                aria-label={copied ? 'Address copied to clipboard' : `Copy full wallet address ${currentAccount.address}`}
+                title={copied ? 'Copied!' : 'Click to copy full address'}
+                style={{
+                  ...styles.addressPill,
+                  cursor: 'pointer',
+                  fontFamily: 'monospace',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
               >
-                Reset
+                {copied ? (
+                  <>
+                    <span aria-hidden>✓</span>
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <span>{shortAddress}</span>
+                    <span aria-hidden style={{ opacity: 0.6, fontSize: 11 }}>⧉</span>
+                  </>
+                )}
               </button>
               <button
                 className="btn-connect"
-                onClick={logout}
+                onClick={() => disconnect()}
+                disabled={isDisconnecting}
                 style={{ background: '#222', color: '#9b9b9b' }}
               >
-                Sign out
+                {isDisconnecting ? 'Signing out...' : 'Sign out'}
               </button>
             </div>
           ) : (
             <button
               className="btn-connect"
-              onClick={loginWithGoogle}
-              disabled={isLoading}
+              onClick={handleSignIn}
+              disabled={signInDisabled}
             >
-              {isLoading ? 'Signing in...' : 'Sign in with Google'}
+              {signInLabel}
             </button>
           )}
 
@@ -102,26 +189,52 @@ export default function Navbar() {
               {item.label}
             </Link>
           ))}
-          {address ? (
+          {currentAccount?.address ? (
             <>
               <button
-                className="btn-connect"
-                onClick={resetLogin}
-                style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
+                type="button"
+                onClick={handleCopyAddress}
+                aria-label={copied ? 'Address copied to clipboard' : `Copy full wallet address ${currentAccount.address}`}
+                style={{
+                  ...styles.addressPill,
+                  width: '100%',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  fontFamily: 'monospace',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: 6,
+                }}
               >
-                Reset login ({shortAddress})
+                {copied ? (
+                  <>
+                    <span aria-hidden>✓</span>
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <span>{shortAddress}</span>
+                    <span aria-hidden style={{ opacity: 0.6, fontSize: 11 }}>⧉</span>
+                  </>
+                )}
               </button>
               <button
                 className="btn-connect"
-                onClick={logout}
+                onClick={() => disconnect()}
+                disabled={isDisconnecting}
                 style={{ width: '100%', justifyContent: 'center', background: '#222', color: '#9b9b9b' }}
               >
-                Sign out ({shortAddress})
+                {isDisconnecting ? 'Signing out...' : 'Sign out'}
               </button>
             </>
           ) : (
-            <button className="btn-connect" onClick={loginWithGoogle} disabled={isLoading} style={{ width: '100%', justifyContent: 'center' }}>
-              {isLoading ? 'Signing in...' : 'Sign in with Google'}
+            <button
+              className="btn-connect"
+              onClick={handleSignIn}
+              disabled={signInDisabled}
+              style={{ width: '100%', justifyContent: 'center' }}
+            >
+              {signInLabel}
             </button>
           )}
         </div>
@@ -214,6 +327,9 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '5px 12px',
     letterSpacing: '0.05em',
     fontFamily: 'monospace',
+  },
+  addressPillHover: {
+    background: '#1f2a23',
   },
   hamburger: {
     display: 'none',

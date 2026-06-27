@@ -9,7 +9,7 @@ import {
   addPredictRedeemLegs,
   defaultPredictConfig,
   type PredictLeg,
-} from './predict_ptb.ts';
+} from './predict_ptb.js';
 
 const RPC_URL = process.env.SUI_RPC_UPSTREAM_URL ?? 'https://sui-testnet-rpc.publicnode.com';
 const NETWORK = 'testnet';
@@ -145,7 +145,7 @@ async function settlementCoinInput(
   keeperAddress: string,
   tx: Transaction,
   amount: bigint,
-): Promise<TransactionResult> {
+): Promise<TransactionResult | ReturnType<Transaction['splitCoins']>[number]> {
   if (amount > 0n) {
     return addPredictManagerWithdraw(tx, PREDICT_CONFIG, PREDICT_MANAGER_ID, amount);
   }
@@ -166,7 +166,7 @@ async function settlementCoinInput(
 async function main(): Promise<void> {
   const signer = Ed25519Keypair.fromSecretKey(parsePrivateKey());
   const keeperAddress = signer.toSuiAddress();
-  const client = new SuiJsonRpcClient({ url: RPC_URL });
+  const client = new SuiJsonRpcClient({ network: NETWORK, url: RPC_URL });
 
   const receipt = await client.getObject({
     id: SLIP_ID,
